@@ -10,6 +10,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from mose.config import assert_signal_account_requires_groups, load_config, signal_runtime_ready
 from mose.observe import setup_logging, get_logger, log_event
@@ -26,6 +27,15 @@ from mose.learning import (
     init_skill_review,
 )
 from mose.tools import init_workspace, init_tool_registry, init_approval, init_terminal, init_skills_dir
+
+
+async def _maybe_start_portal_approval_bridge(config) -> Any:
+    """Start POST /approve when ``[portal].enabled`` (mutating Code Mode MCP calls)."""
+    if not config.portal.enabled:
+        return None
+    from mose.approval_bridge import start_approval_bridge
+
+    return await start_approval_bridge(config.portal)
 
 
 async def _cli_skill_propose_callback(
@@ -371,86 +381,93 @@ async def main() -> None:
     await mcp.load_servers(mcp_config_path)
     init_tool_registry(mcp)
 
-    # Choose mode: Signal > Discord > CLI
-    if signal_runtime_ready(config.signal):
-        from mose.signal_bot import (
-            MoseSignalBot,
-            _signal_approval_callback,
-            _signal_skill_propose_callback,
-            _signal_skill_recovery_notice,
-            _signal_skill_review_notify,
-        )
-        init_skill_promotion(_signal_skill_propose_callback)
-        init_skill_reminder(None)  # superseded by the consolidated recovery notice
-        init_skill_recovery_notice(_signal_skill_recovery_notice)
-        init_skill_review(_signal_skill_review_notify)
-        init_approval(_signal_approval_callback)
-        agent = Agent(config, llm, memory, mcp)
-        init_skill_decision_runtime(learner=agent._skill_learner, memory=memory, llm=llm)
-        agent.start_skill_review_loop()
-        bot = MoseSignalBot(agent, config.signal)
-        # Defer restart recovery until Signal is connected so the consolidated
-        # notice can actually reach the admin. Expiration + rejection file
-        # moves still happen deterministically inside run_startup_recovery.
-        bot.on_ready = agent.recover_pending_approvals
-        log_event(logger, "starting_signal_bot")
-        try:
-            await bot.start()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            await agent.stop_skill_review_loop()
-            await bot.close()
-    elif config.discord.token:
-        from mose.discord_bot import MoseDiscordBot, _discord_approval_callback
-        # Discord skill-proposal UX is not wired; no callback means proposals
-        # are rejected immediately and never built (required by policy).
-        init_skill_promotion(None)
-        init_skill_reminder(None)
-        init_skill_recovery_notice(None)
-        init_skill_review(None)
-        init_approval(_discord_approval_callback)
-        agent = Agent(config, llm, memory, mcp)
-        init_skill_decision_runtime(learner=agent._skill_learner, memory=memory, llm=llm)
-        # Discord path has no approval UX: run recovery so the DB still
-        # ages out expired rows, but there's no channel to notify.
-        await agent.recover_pending_approvals()
-        agent.start_skill_review_loop()
-        bot = MoseDiscordBot(agent)
-        log_event(logger, "starting_discord_bot")
-        try:
-            await bot.start(config.discord.token)
-        except KeyboardInterrupt:
-            pass
-        finally:
-            await agent.stop_skill_review_loop()
-            await bot.close()
-    else:
-        init_skill_promotion(_cli_skill_propose_callback)
-        init_skill_reminder(None)  # CLI reminds through foreground prompts
-        init_skill_recovery_notice(_cli_skill_recovery_notice)
-        init_skill_review(_cli_skill_review_notify)
-        init_approval(_cli_approval_callback)
-        log_event(logger, "cli_mode")
+    approval_bridge_handle: Any = None
+    try:
+        # Choose mode: Signal > Discord > CLI
+        if signal_runtime_ready(config.signal):
+            from mose.signal_bot import (
+                MoseSignalBot,
+                _signal_approval_callback,
+                _signal_skill_propose_callback,
+                _signal_skill_recovery_notice,
+                _signal_skill_review_notify,
+            )
+            init_skill_promotion(_signal_skill_propose_callback)
+            init_skill_reminder(None)  # superseded by the consolidated recovery notice
+            init_skill_recovery_notice(_signal_skill_recovery_notice)
+            init_skill_review(_signal_skill_review_notify)
+            init_approval(_signal_approval_callback)
+            approval_bridge_handle = await _maybe_start_portal_approval_bridge(config)
+            agent = Agent(config, llm, memory, mcp)
+            init_skill_decision_runtime(learner=agent._skill_learner, memory=memory, llm=llm)
+            agent.start_skill_review_loop()
+            bot = MoseSignalBot(agent, config.signal)
+            # Defer restart recovery until Signal is connected so the consolidated
+            # notice can actually reach the admin. Expiration + rejection file
+            # moves still happen deterministically inside run_startup_recovery.
+            bot.on_ready = agent.recover_pending_approvals
+            log_event(logger, "starting_signal_bot")
+            try:
+                await bot.start()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                await agent.stop_skill_review_loop()
+                await bot.close()
+        elif config.discord.token:
+            from mose.discord_bot import MoseDiscordBot, _discord_approval_callback
+            # Discord skill-proposal UX is not wired; no callback means proposals
+            # are rejected immediately and never built (required by policy).
+            init_skill_promotion(None)
+            init_skill_reminder(None)
+            init_skill_recovery_notice(None)
+            init_skill_review(None)
+            init_approval(_discord_approval_callback)
+            approval_bridge_handle = await _maybe_start_portal_approval_bridge(config)
+            agent = Agent(config, llm, memory, mcp)
+            init_skill_decision_runtime(learner=agent._skill_learner, memory=memory, llm=llm)
+            # Discord path has no approval UX: run recovery so the DB still
+            # ages out expired rows, but there's no channel to notify.
+            await agent.recover_pending_approvals()
+            agent.start_skill_review_loop()
+            bot = MoseDiscordBot(agent)
+            log_event(logger, "starting_discord_bot")
+            try:
+                await bot.start(config.discord.token)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                await agent.stop_skill_review_loop()
+                await bot.close()
+        else:
+            init_skill_promotion(_cli_skill_propose_callback)
+            init_skill_reminder(None)  # CLI reminds through foreground prompts
+            init_skill_recovery_notice(_cli_skill_recovery_notice)
+            init_skill_review(_cli_skill_review_notify)
+            init_approval(_cli_approval_callback)
+            approval_bridge_handle = await _maybe_start_portal_approval_bridge(config)
+            log_event(logger, "cli_mode")
 
-        # Suppress console log noise in CLI mode
-        for h in logging.getLogger("mose").handlers:
-            if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
-                h.setLevel(logging.WARNING)
+            # Suppress console log noise in CLI mode
+            for h in logging.getLogger("mose").handlers:
+                if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+                    h.setLevel(logging.WARNING)
 
-        agent = Agent(config, llm, memory, mcp, tool_callback=_print_tool_call)
-        init_skill_decision_runtime(learner=agent._skill_learner, memory=memory, llm=llm)
-        await agent.recover_pending_approvals()
-        agent.start_skill_review_loop()
-        try:
-            await _run_cli(agent)
-        finally:
-            await agent.stop_skill_review_loop()
+            agent = Agent(config, llm, memory, mcp, tool_callback=_print_tool_call)
+            init_skill_decision_runtime(learner=agent._skill_learner, memory=memory, llm=llm)
+            await agent.recover_pending_approvals()
+            agent.start_skill_review_loop()
+            try:
+                await _run_cli(agent)
+            finally:
+                await agent.stop_skill_review_loop()
+    finally:
+        from mose.approval_bridge import stop_approval_bridge
 
-    # Cleanup
-    await mcp.close()
-    memory.close()
-    log_event(logger, "shutdown")
+        await stop_approval_bridge(approval_bridge_handle)
+        await mcp.close()
+        memory.close()
+        log_event(logger, "shutdown")
 
 
 if __name__ == "__main__":

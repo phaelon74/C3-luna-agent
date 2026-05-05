@@ -59,12 +59,12 @@ Start a **new thread** for each test run to avoid memory contamination.
 
 ---
 
-## 7. MCP tool discovery
+## 7. MCP Code Mode (portal)
 
-> What tools do you have available beyond your built-ins?
+> Use portal_codemode_search to find a Plex read-only tool (e.g. library list), then run a tiny portal_codemode_execute snippet that logs something safe.
 
-**Expect:** Calls `list_available_tools`, reports MCP tools (e.g. paper_db tools: index_paper, search_papers, get_stats).
-**Tests:** MCP tool registry, meta-tool discovery.
+**Expect:** Uses `mcp-portal__portal_codemode_search` then `mcp-portal__portal_codemode_execute` (or equivalent), not raw `bash` to hit Plex.
+**Tests:** Portal search/execute path, sandbox RPC.
 
 ---
 

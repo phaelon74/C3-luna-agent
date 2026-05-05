@@ -1,0 +1,49 @@
+{
+  "servers": {
+    "paper_db": {
+      "command": "python",
+      "args": ["data/workspace/paper_db/paper_db_server.py"],
+      "transport": "stdio"
+    },
+    "plex-ops-admin": {
+      "command": "docker",
+      "args": [
+        "exec",
+        "-i",
+        "mose-plex-ops-admin",
+        "/usr/local/bin/mcp-entrypoint"
+      ],
+      "transport": "stdio"
+    },
+    "plex-stack-automation": {
+      "command": "docker",
+      "args": [
+        "exec",
+        "-i",
+        "mose-plex-stack-automation",
+        "/usr/local/bin/mcp-entrypoint"
+      ],
+      "transport": "stdio"
+    },
+    "sonarr-diagnostics": {
+      "command": "docker",
+      "args": [
+        "exec",
+        "-i",
+        "mose-sonarr-diagnostics",
+        "/usr/local/bin/mcp-entrypoint-sonarr"
+      ],
+      "transport": "stdio"
+    },
+    "radarr-diagnostics": {
+      "command": "docker",
+      "args": [
+        "exec",
+        "-i",
+        "mose-radarr-diagnostics",
+        "/usr/local/bin/mcp-entrypoint-radarr"
+      ],
+      "transport": "stdio"
+    }
+  }
+}

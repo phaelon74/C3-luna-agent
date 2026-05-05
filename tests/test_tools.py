@@ -19,6 +19,7 @@ from mose.tools import (
     _DELEGATE_ALLOWED_TOOLS,
     _get_delegate_tools,
     call_native_tool,
+    execute_mcp_tool,
     init_approval,
     init_workspace,
     init_tool_registry,
@@ -49,7 +50,7 @@ class TestToolRegistry:
         names = {t["function"]["name"] for t in NATIVE_TOOLS}
         assert names == {
             "bash", "sre_execute", "load_skill", "read_file", "write_file", "list_directory",
-            "web_fetch", "web_search", "list_available_tools", "use_tool",
+            "web_fetch", "web_search",
             "summarize_paper", "delegate", "code_task",
         }
 
@@ -362,64 +363,14 @@ def _make_mock_mcp(tools=None):
     return mcp
 
 
-class TestListAvailableTools:
-    @pytest.mark.asyncio
-    async def test_returns_tool_names_and_descriptions(self):
-        mcp = _make_mock_mcp([
-            {"name": "srv__foo", "description": "Does foo things"},
-            {"name": "srv__bar", "description": "Does bar things"},
-        ])
-        init_tool_registry(mcp)
-        result = await call_native_tool("list_available_tools", {})
-        assert "srv__foo" in result
-        assert "Does foo things" in result
-        assert "srv__bar" in result
-        assert "Does bar things" in result
-        assert "2" in result  # count
-
-    @pytest.mark.asyncio
-    async def test_empty_mcp_manager(self):
-        mcp = _make_mock_mcp()  # no servers
-        init_tool_registry(mcp)
-        result = await call_native_tool("list_available_tools", {})
-        assert "No additional tools available" in result
-
-    @pytest.mark.asyncio
-    async def test_no_mcp_configured(self):
-        init_tool_registry(None)
-        result = await call_native_tool("list_available_tools", {})
-        assert "No additional tools available" in result
-
-    @pytest.mark.asyncio
-    async def test_query_filter(self):
-        mcp = _make_mock_mcp([
-            {"name": "srv__search", "description": "Search the web"},
-            {"name": "srv__calendar", "description": "Manage calendar events"},
-        ])
-        init_tool_registry(mcp)
-        result = await call_native_tool("list_available_tools", {"query": "calendar"})
-        assert "srv__calendar" in result
-        assert "srv__search" not in result
-
-    @pytest.mark.asyncio
-    async def test_query_no_match(self):
-        mcp = _make_mock_mcp([
-            {"name": "srv__foo", "description": "Does foo"},
-        ])
-        init_tool_registry(mcp)
-        result = await call_native_tool("list_available_tools", {"query": "zzz_nonexistent"})
-        assert "No tools matching" in result
-
-
-class TestUseTool:
+class TestExecuteMcpTool:
     @pytest.mark.asyncio
     async def test_dispatches_to_mcp(self):
-        mcp = _make_mock_mcp([
-            {"name": "srv__foo", "description": "Does foo"},
-        ])
+        mcp = _make_mock_mcp([{"name": "srv__foo", "description": "Does foo"}])
         init_tool_registry(mcp)
-        result = await call_native_tool("use_tool", {"name": "srv__foo", "arguments": {"key": "val"}})
-        assert result == "tool result"
+        text, err = await execute_mcp_tool("srv__foo", {"key": "val"})
+        assert text == "tool result"
+        assert not err
         mcp.call_tool.assert_awaited_once_with("srv__foo", {"key": "val"})
 
     @pytest.mark.asyncio
@@ -427,44 +378,29 @@ class TestUseTool:
         mcp = _make_mock_mcp()
         mcp.call_tool = AsyncMock(return_value=("Error: Unknown tool 'srv__nope'", False))
         init_tool_registry(mcp)
-        result = await call_native_tool("use_tool", {"name": "srv__nope", "arguments": {}})
-        assert "Error" in result
+        text, err = await execute_mcp_tool("srv__nope", {})
+        assert "Error" in text
+        assert not err
 
     @pytest.mark.asyncio
     async def test_malformed_name_requires_server_tool_separator(self):
         mcp = _make_mock_mcp()
         init_tool_registry(mcp)
-        result = await call_native_tool("use_tool", {"name": "nope", "arguments": {}})
-        assert "Error" in result
-        assert "server__tool" in result
+        text, err = await execute_mcp_tool("nope", {})
+        assert "Error" in text
+        assert "server__tool" in text
         mcp.call_tool.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_missing_name(self):
-        mcp = _make_mock_mcp()
-        init_tool_registry(mcp)
-        result = await call_native_tool("use_tool", {})
-        assert "Error" in result
-        assert "'name' is required" in result
 
     @pytest.mark.asyncio
     async def test_no_mcp_configured(self):
         init_tool_registry(None)
-        result = await call_native_tool("use_tool", {"name": "anything"})
-        assert "Error" in result
-        assert "MCP not configured" in result
-
-    @pytest.mark.asyncio
-    async def test_default_empty_arguments(self):
-        mcp = _make_mock_mcp([
-            {"name": "srv__ping", "description": "Ping"},
-        ])
-        init_tool_registry(mcp)
-        await call_native_tool("use_tool", {"name": "srv__ping"})
-        mcp.call_tool.assert_awaited_once_with("srv__ping", {})
+        text, err = await execute_mcp_tool("srv__anything", {})
+        assert "Error" in text
+        assert "MCP not configured" in text
+        assert not err
 
 
-class TestUseToolMcpApproval:
+class TestExecuteMcpToolMcpApproval:
     """Protected Plex MCP servers require approval for non-readlisted tools."""
 
     @pytest.fixture(autouse=True)
@@ -479,11 +415,9 @@ class TestUseToolMcpApproval:
             [{"name": "plex-ops-admin__library_list", "description": "List libs"}]
         )
         init_tool_registry(mcp)
-        result = await call_native_tool(
-            "use_tool",
-            {"name": "plex-ops-admin__library_list", "arguments": {}},
-        )
-        assert result == "tool result"
+        text, err = await execute_mcp_tool("plex-ops-admin__library_list", {})
+        assert text == "tool result"
+        assert not err
         mcp.call_tool.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -492,12 +426,13 @@ class TestUseToolMcpApproval:
             [{"name": "plex-ops-admin__library_scan", "description": "Scan"}]
         )
         init_tool_registry(mcp)
-        result = await call_native_tool(
-            "use_tool",
-            {"name": "plex-ops-admin__library_scan", "arguments": {"library_name": "TV"}},
+        text, err = await execute_mcp_tool(
+            "plex-ops-admin__library_scan",
+            {"library_name": "TV"},
         )
-        assert "denied" in result.lower()
-        assert "approval" in result.lower()
+        assert not err
+        assert "denied" in text.lower()
+        assert "approval" in text.lower()
         mcp.call_tool.assert_not_called()
 
     @pytest.mark.asyncio
@@ -507,11 +442,9 @@ class TestUseToolMcpApproval:
         )
         init_tool_registry(mcp)
         init_approval(lambda c, r, t: True)
-        result = await call_native_tool(
-            "use_tool",
-            {"name": "plex-ops-admin__library_scan", "arguments": {}},
-        )
-        assert result == "tool result"
+        text, err = await execute_mcp_tool("plex-ops-admin__library_scan", {})
+        assert text == "tool result"
+        assert not err
         mcp.call_tool.assert_awaited_once_with("plex-ops-admin__library_scan", {})
 
     @pytest.mark.asyncio
@@ -521,11 +454,12 @@ class TestUseToolMcpApproval:
         )
         init_tool_registry(mcp)
         init_approval(lambda c, r, t: False)
-        result = await call_native_tool(
-            "use_tool",
-            {"name": "plex-stack-automation__sonarr_add_series", "arguments": {"x": 1}},
+        text, err = await execute_mcp_tool(
+            "plex-stack-automation__sonarr_add_series",
+            {"x": 1},
         )
-        assert "denied" in result.lower()
+        assert not err
+        assert "denied" in text.lower()
         mcp.call_tool.assert_not_called()
 
     @pytest.mark.asyncio
@@ -535,10 +469,7 @@ class TestUseToolMcpApproval:
         )
         init_tool_registry(mcp)
         init_approval(lambda c, r, t: True)
-        await call_native_tool(
-            "use_tool",
-            {"name": "plex-ops-admin__brand_new_upstream_tool", "arguments": {}},
-        )
+        await execute_mcp_tool("plex-ops-admin__brand_new_upstream_tool", {})
         mcp.call_tool.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -552,11 +483,9 @@ class TestUseToolMcpApproval:
             return True
 
         init_approval(approve)
-        result = await call_native_tool(
-            "use_tool",
-            {"name": "plex-ops-admin__library_refresh", "arguments": {}},
-        )
-        assert result == "tool result"
+        text, err = await execute_mcp_tool("plex-ops-admin__library_refresh", {})
+        assert text == "tool result"
+        assert not err
 
 
 class TestDelegateTool:
@@ -564,8 +493,8 @@ class TestDelegateTool:
         """Delegate must not be able to call itself."""
         assert "delegate" not in _DELEGATE_ALLOWED_TOOLS
 
-    def test_mcp_meta_tools_not_in_allowed_tools(self):
-        """MCP meta-tools should not be available to sub-agent."""
+    def test_removed_mcp_helpers_not_in_delegate_tools(self):
+        """Legacy list_available_tools / use_tool must not be available to sub-agent."""
         assert "list_available_tools" not in _DELEGATE_ALLOWED_TOOLS
         assert "use_tool" not in _DELEGATE_ALLOWED_TOOLS
 
@@ -620,7 +549,7 @@ class TestDelegateTool:
 
     @pytest.mark.asyncio
     async def test_delegation_blocks_disallowed_tools(self):
-        """Test that sub-agent cannot use delegate or MCP meta-tools."""
+        """Test that sub-agent cannot use delegate or removed MCP helper tools."""
         mock_llm = MagicMock()
         mock_llm.chat = AsyncMock(side_effect=[
             LLMResponse(
@@ -759,8 +688,8 @@ class TestCodeTask:
         """code_task must not be able to spawn delegate."""
         assert "delegate" not in _CODE_TASK_ALLOWED_TOOLS
 
-    def test_use_tool_not_in_code_task_allowed(self):
-        """code_task must not be able to call MCP meta-tools."""
+    def test_portal_helpers_not_in_code_task_allowed(self):
+        """code_task must not rely on removed MCP helper tools."""
         assert "use_tool" not in _CODE_TASK_ALLOWED_TOOLS
         assert "list_available_tools" not in _CODE_TASK_ALLOWED_TOOLS
 
@@ -820,7 +749,7 @@ class TestCodeTask:
 
     @pytest.mark.asyncio
     async def test_blocks_disallowed_tools(self):
-        """Sub-agent cannot use delegate, use_tool, or code_task."""
+        """Sub-agent cannot use delegate or code_task (recursion)."""
         mock_llm = MagicMock()
         mock_llm.chat = AsyncMock(side_effect=[
             LLMResponse(

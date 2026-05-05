@@ -130,12 +130,27 @@ Use for multi-step research, complex file operations, or anything that benefits 
 - **code_task**: Delegate a coding task to a sub-agent that writes code, runs it, checks results, \
 and iterates on failures. Use for scripts, scrapers, automation, or any task requiring write-run-fix cycles. \
 Prefer this over delegate for coding work.
-- **Integrated backends (MCP)**: Tools named ``server__tool`` (for example ``plex-ops-admin__sessions_get_active``, \
-``sonarr-diagnostics__sonarr_get_queue``, ``sonarr-diagnostics__sonarr_post_queue_import``, ``radarr-diagnostics__radarr_get_queue``, ``radarr-diagnostics__radarr_post_queue_import`` — Radarr uses **GET/POST /manualimport** plus **POST /command** ``ManualImport``, same idea as Sonarr) \
-call Plex, Sonarr, Radarr, and other MCP backends. **Prefer these** for those systems. Do not use ``bash``/``curl`` \
-to reach those services — credentials and policy are not available in the shell.
-- **list_available_tools / use_tool**: When these appear in your tool list (MCP inlining disabled in config), \
-use them to discover or call MCP tools by name.
+- **MCP via Code Mode**: Backend systems (Plex, Sonarr, Radarr, paper index, etc.) are reached through tools \
+``mcp-portal__portal_codemode_search`` and ``mcp-portal__portal_codemode_execute``. TypeScript runs in a sandbox; \
+you get a global ``mcp`` object whose shape mirrors upstream MCP servers, namespaced by server in snake_case \
+(e.g. ``mcp.plex_ops_admin.sessions_get_active``, ``mcp.paper_db.index_paper``).
+
+Workflow:
+1. Call ``mcp-portal__portal_codemode_search`` with a query to discover tools — each hit includes a working code example.
+2. Call ``mcp-portal__portal_codemode_execute`` with TypeScript that uses ``mcp.*``, and ``console.log`` the final answer.
+3. If execute returns errors, read structured ``errors[]`` (kind: ts_compile / runtime / mcp_call; line; failing mcp call). \
+Fix and retry; do not guess.
+
+### Worked example
+User asks: "what's currently playing on Plex?"
+1. ``mcp-portal__portal_codemode_search`` with query ``active plex sessions`` → finds ``sessions_get_active``.
+2. ``mcp-portal__portal_codemode_execute`` with code:
+   ``const sessions = await mcp.plex_ops_admin.sessions_get_active({});``
+   ``for (const s of sessions.MediaContainer?.Metadata ?? []) {``
+   ``  console.log(`${s.User?.title}: ${s.title} (${s.Player?.title})`);``
+   ``}``
+
+Always prefer Code Mode over ``bash``/``curl`` for these systems — credentials and approval policy live in the portal, not in the shell.
 
 ## Guidelines
 - Act, don't ask. You have tools — use them. Install packages, run commands, create files, scan networks. \
@@ -296,45 +311,30 @@ class Agent:
             ),
         )
         self._review_task: asyncio.Task[Any] | None = None
-        # Log tool_list_over_cap at most once per session_id.
-        self._tool_list_cap_logged_sessions: set[str] = set()
         # Per-session guard: same MCP tool+args + SDK isError twice → skip further calls (no approval spam).
         self._mcp_repeat_guard: dict[str, dict[str, Any]] = {}
 
     def _build_llm_tools(self, session_id: str) -> list[dict[str, Any]]:
-        """Native tools plus inlined MCP tools (local list; never mutates ``NATIVE_TOOLS``)."""
+        """Native tools plus MCP tools from connected servers (local list; never mutates ``NATIVE_TOOLS``)."""
+        del session_id  # reserved for future per-session tool shaping
         cfg = self.config.agent
         llm_tools: list[dict[str, Any]] = list(NATIVE_TOOLS)
-        mcp_added = 0
-        if cfg.inline_mcp_tools and self.mcp.servers:
-            mcp_tools = self.mcp.get_all_tools()
-            allowed = [s.strip() for s in cfg.inline_mcp_servers if str(s).strip()]
-            if allowed:
-                allowed_set = frozenset(allowed)
-                filtered: list[dict[str, Any]] = []
-                for entry in mcp_tools:
-                    name = str(entry.get("function", {}).get("name", ""))
-                    if "__" not in name:
-                        continue
-                    server = name.split("__", 1)[0].strip()
-                    if server in allowed_set:
-                        filtered.append(entry)
-                mcp_tools = filtered
-            llm_tools.extend(mcp_tools)
-            mcp_added = len(mcp_tools)
-        if mcp_added > 0:
-            meta = frozenset({"list_available_tools", "use_tool"})
-            llm_tools = [t for t in llm_tools if t.get("function", {}).get("name") not in meta]
-        cap = cfg.inline_mcp_tools_soft_cap
-        if len(llm_tools) > cap and session_id not in self._tool_list_cap_logged_sessions:
-            self._tool_list_cap_logged_sessions.add(session_id)
-            log_event(
-                logger,
-                "tool_list_over_cap",
-                count=len(llm_tools),
-                cap=cap,
-                session_id=session_id,
-            )
+        if not self.mcp.servers:
+            return llm_tools
+        mcp_tools = self.mcp.get_all_tools()
+        allowed = [s.strip() for s in cfg.inline_mcp_servers if str(s).strip()]
+        if allowed:
+            allowed_set = frozenset(allowed)
+            filtered: list[dict[str, Any]] = []
+            for entry in mcp_tools:
+                name = str(entry.get("function", {}).get("name", ""))
+                if "__" not in name:
+                    continue
+                server = name.split("__", 1)[0].strip()
+                if server in allowed_set:
+                    filtered.append(entry)
+            mcp_tools = filtered
+        llm_tools.extend(mcp_tools)
         return llm_tools
 
     async def process(

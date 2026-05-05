@@ -52,7 +52,7 @@ def inline_agent(tmp_path):
     return Agent(config, llm, memory, mcp)
 
 
-def test_build_llm_tools_merges_and_strips_meta(inline_agent):
+def test_build_llm_tools_merges_mcp_with_native(inline_agent):
     names = {t["function"]["name"] for t in inline_agent._build_llm_tools("sess-1")}
     assert "srv__ping" in names
     assert "bash" in names
@@ -60,7 +60,7 @@ def test_build_llm_tools_merges_and_strips_meta(inline_agent):
     assert "list_available_tools" not in names
 
 
-def test_build_llm_tools_inline_off_keeps_meta(tmp_path):
+def test_build_llm_tools_merges_mcp_when_inline_flag_false(tmp_path):
     from mose.observe import setup_logging
 
     setup_logging(str(tmp_path / "logs"), "DEBUG")
@@ -84,8 +84,8 @@ def test_build_llm_tools_inline_off_keeps_meta(tmp_path):
     agent = Agent(config, llm, memory, mcp)
 
     names = {t["function"]["name"] for t in agent._build_llm_tools("s")}
-    assert "use_tool" in names
-    assert "srv__ping" not in names
+    assert "use_tool" not in names
+    assert "srv__ping" in names
 
 
 def test_build_llm_tools_server_allowlist(tmp_path):

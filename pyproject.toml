@@ -28,6 +28,8 @@ dependencies = [
     "html2text",
     "ddgs>=7.0",
     "docker>=7.0,<8",
+    "websockets>=12,<16",
+    "aiohttp>=3.9,<4",
 ]
 
 [project.optional-dependencies]
@@ -40,7 +42,10 @@ drivepool = ["pypsrp>=0.10"]
 paper = ["arxiv>=2.0"]
 
 [tool.setuptools.packages.find]
-include = ["mose*"]
+include = ["mose*", "mose_portal"]
+
+[project.scripts]
+mose-portal = "mose_portal.__main__:main"
 
 [build-system]
 requires = ["setuptools>=68.0"]

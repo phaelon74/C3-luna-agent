@@ -31,7 +31,8 @@ COPY . .
 
 # If no registry was copied (minimal clone / CI), seed from the repo example — do not
 # overwrite an existing mcp_servers.json from COPY (operator-local file).
-RUN if [ ! -f mcp_servers.json ]; then cp mcp_servers.example.json mcp_servers.json; fi
+RUN if [ ! -f mcp_servers.json ]; then cp mcp_servers.example.json mcp_servers.json; fi \
+    && if [ ! -f mcp_servers.portal.json ]; then cp mcp_servers.portal.example.json mcp_servers.portal.json; fi
 
 # Fail fast with actionable errors if pyproject.toml is a BOM/LFS pointer/UTF-16 style corrupt file.
 RUN python3 docker/check_pyproject.py

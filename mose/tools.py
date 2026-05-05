@@ -85,6 +85,27 @@ def init_approval(callback: Callable[[str, str, str], Any] | None) -> None:
     _approval_callback = callback
 
 
+def format_mcp_mutate_approval_command(full_name: str, arguments: dict[str, Any]) -> tuple[str, str, str]:
+    """Build ``(command, reason, target_system)`` for mutating MCP tool approval (shared with Code Mode bridge)."""
+    arg_str = json.dumps(arguments, default=str)
+    if len(arg_str) > 500:
+        arg_str = arg_str[:497] + "..."
+    server = full_name.split("__", 1)[0].strip()
+    command = f"{full_name}({arg_str})"
+    reason = "MCP tool not on read allowlist (default-deny for protected servers)"
+    return command, reason, f"mcp:{server}"
+
+
+async def invoke_approval_callback(command: str, reason: str, target_system: str) -> bool:
+    """Run the registered approval callback; False if none or denied."""
+    if _approval_callback is None:
+        return False
+    result = _approval_callback(command, reason, target_system)
+    if asyncio.iscoroutine(result):
+        return bool(await result)
+    return bool(result)
+
+
 def init_skills_dir(skills_path: str) -> None:
     """Set the directory used by load_skill (repo skills/ folder)."""
     global _skills_dir
@@ -293,43 +314,6 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_available_tools",
-            "description": "List additional tools available beyond the built-in ones. Returns tool names and descriptions. Use this to discover what extra capabilities are available.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Optional keyword to filter tools by name or description.",
-                    },
-                },
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "use_tool",
-            "description": "Call a discovered tool by name. Use list_available_tools first to find available tools and their expected arguments.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The tool name (as returned by list_available_tools).",
-                    },
-                    "arguments": {
-                        "type": "object",
-                        "description": "Arguments to pass to the tool.",
-                    },
-                },
-                "required": ["name"],
             },
         },
     },
@@ -769,29 +753,8 @@ async def _tool_web_search(args: dict, context: str = "", llm=None, root=None, *
     return await process_large_output(output, context or query, f"web_search_{query[:30]}", llm, root=root)
 
 
-async def _tool_list_available_tools(args: dict, **kwargs) -> str:
-    if _mcp_manager is None:
-        return "No additional tools available (MCP not configured)."
-
-    query = args.get("query", "").lower()
-    lines: list[str] = []
-    for server in _mcp_manager.servers.values():
-        for tool in server.tools:
-            name = tool["name"]
-            desc = tool.get("description", "")
-            if query and query not in name.lower() and query not in desc.lower():
-                continue
-            lines.append(f"- **{name}**: {desc}")
-
-    if not lines:
-        if query:
-            return f"No tools matching '{query}'."
-        return "No additional tools available."
-    return f"Available tools ({len(lines)}):\n" + "\n".join(lines)
-
-
 async def execute_mcp_tool(full_name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
-    """Run an MCP tool by ``server__tool`` name with read/write policy (shared with ``use_tool``).
+    """Run an MCP tool by ``server__tool`` name with read/write policy (Code Mode + direct MCP).
 
     Returns ``(text, is_mcp_error)`` where ``is_mcp_error`` is True when the MCP SDK marks the
     tool result as an error (e.g. FastMCP input validation), not for normal JSON error bodies.
@@ -829,17 +792,8 @@ async def execute_mcp_tool(full_name: str, arguments: dict[str, Any]) -> tuple[s
                 "(SIGNAL_ADMIN_GROUP_ID) or use CLI / Discord with approval enabled.",
                 False,
             )
-        arg_str = json.dumps(arguments, default=str)
-        if len(arg_str) > 500:
-            arg_str = arg_str[:497] + "..."
-        command = f"{full_name}({arg_str})"
-        reason = "MCP tool not on read allowlist (default-deny for protected servers)"
-        target_system = f"mcp:{server}"
-        result = _approval_callback(command, reason, target_system)
-        if asyncio.iscoroutine(result):
-            approved = await result
-        else:
-            approved = bool(result)
+        command, reason, target_system = format_mcp_mutate_approval_command(full_name, arguments)
+        approved = await invoke_approval_callback(command, reason, target_system)
         if not approved:
             log_event(
                 logger,
@@ -851,23 +805,6 @@ async def execute_mcp_tool(full_name: str, arguments: dict[str, Any]) -> tuple[s
         log_event(logger, "use_tool_approved", tool=full_name, target_system=target_system)
 
     return await _mcp_manager.call_tool(full_name, arguments)
-
-
-async def _tool_use_tool(args: dict, **kwargs) -> str:
-    name = args.get("name", "")
-    if not name:
-        return "Error: 'name' is required"
-
-    if _mcp_manager is None:
-        return "Error: MCP not configured — no external tools available."
-
-    arguments = args.get("arguments", {})
-    if isinstance(arguments, str):
-        arguments = json.loads(arguments) if arguments else {}
-
-    full_name = str(name).strip()
-    text, _err = await execute_mcp_tool(full_name, arguments)
-    return text
 
 
 # --- Summarize paper (extract-then-summarize) ---
@@ -919,14 +856,28 @@ async def _tool_summarize_paper(args: dict, context: str = "", llm=None, root=No
     if style not in _STYLE_INSTRUCTIONS:
         return f"Error: style must be 'technical' or 'linkedin', got '{style}'"
 
-    # Step 1: Fetch paper metadata via MCP paper_db or direct arXiv call
+    # Step 1: Best-effort index in paper_db via Code Mode (portal aggregates paper_db upstream)
     paper_meta = None
-    if _mcp_manager is not None:
+    if _mcp_manager is not None and "mcp-portal" in _mcp_manager.servers:
         try:
-            index_result, _paper_err = await _mcp_manager.call_tool(
-                "paper_db__index_paper", {"arxiv_id": arxiv_id}
+            aid = json.dumps(str(arxiv_id))
+            code = (
+                f"const r = await mcp.paper_db.index_paper({{ arxiv_id: {aid} }});\n"
+                'console.log(typeof r === "string" ? r : JSON.stringify(r));'
             )
-            log_event(logger, "summarize_paper_indexed", arxiv_id=arxiv_id)
+            _idx_text, idx_err = await execute_mcp_tool(
+                "mcp-portal__portal_codemode_execute",
+                {"code": code, "timeout_seconds": 120},
+            )
+            if idx_err:
+                log_event(
+                    logger,
+                    "summarize_paper_index_failed",
+                    arxiv_id=arxiv_id,
+                    error="portal_codemode_execute marked MCP error",
+                )
+            else:
+                log_event(logger, "summarize_paper_indexed", arxiv_id=arxiv_id)
         except Exception as e:
             log_event(logger, "summarize_paper_index_failed", arxiv_id=arxiv_id, error=str(e))
 
@@ -1221,8 +1172,6 @@ _TOOL_REGISTRY: dict[str, Any] = {
     "list_directory": _tool_list_directory,
     "web_fetch": _tool_web_fetch,
     "web_search": _tool_web_search,
-    "list_available_tools": _tool_list_available_tools,
-    "use_tool": _tool_use_tool,
     "summarize_paper": _tool_summarize_paper,
     "delegate": _tool_delegate,
     "code_task": _tool_code_task,

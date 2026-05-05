@@ -114,11 +114,11 @@ class AgentConfig:
     allow_read_outside: bool = True
     skills_path: str = "skills"
     recent_messages_limit: int = 15
-    # Inline MCP tool schemas into the LLM tools array (main agent only).
+    # Legacy: ignored by the agent. MCP tool schemas from connected servers are always merged.
     inline_mcp_tools: bool = True
-    # If non-empty, only tools whose name starts with "<server>__" are inlined.
+    # If non-empty, only tools whose name starts with "<server>__" are merged.
     inline_mcp_servers: list[str] = field(default_factory=list)
-    # Log once per session when len(tools) exceeds this (soft cap; no hard trim).
+    # Legacy soft cap (no longer enforced).
     inline_mcp_tools_soft_cap: int = 200
 
 
@@ -132,6 +132,19 @@ class TerminalConfig:
     backend: str = "local"  # local | docker | legacy_shell
     container: str = "mose-sandbox"
     workspace_mount: str = "/workspace"
+
+
+@dataclass
+class PortalConfig:
+    """Code Mode portal integration: HTTP approval bridge for mutating MCP calls from the sandbox."""
+
+    # When True, ``python -m mose`` starts POST /approve on approval_bridge_port (see mose/approval_bridge.py).
+    enabled: bool = False
+    approval_bridge_host: str = "0.0.0.0"
+    approval_bridge_port: int = 9100
+    # Reserved for portal_codemode_execute defaults (Phase 4 wiring); documented here for operators.
+    code_timeout_seconds: int = 30
+    code_max_timeout: int = 120
 
 
 @dataclass
@@ -172,6 +185,7 @@ class Config:
     agent: AgentConfig = field(default_factory=AgentConfig)
     terminal: TerminalConfig = field(default_factory=TerminalConfig)
     learning: LearningConfig = field(default_factory=LearningConfig)
+    portal: PortalConfig = field(default_factory=PortalConfig)
     root_dir: Path = _ROOT
 
 
@@ -208,6 +222,8 @@ def load_config(config_path: Path | None = None) -> Config:
             _apply_section(cfg.terminal, raw["terminal"])
         if "learning" in raw:
             _apply_section(cfg.learning, raw["learning"])
+        if "portal" in raw:
+            _apply_section(cfg.portal, raw["portal"])
 
     # Env var overrides
     if token := os.environ.get("DISCORD_TOKEN"):
@@ -238,6 +254,16 @@ def load_config(config_path: Path | None = None) -> Config:
         cfg.llm.provider = provider
     if (omit_temp := _env_optional_bool("LLM_OMIT_TEMPERATURE")) is not None:
         cfg.llm.omit_temperature = omit_temp
+
+    if (pe := _env_optional_bool("MOSE_PORTAL_ENABLED")) is not None:
+        cfg.portal.enabled = pe
+    if (ph := os.environ.get("MOSE_PORTAL_APPROVAL_HOST")) is not None and str(ph).strip():
+        cfg.portal.approval_bridge_host = str(ph).strip()
+    if (pp := os.environ.get("MOSE_PORTAL_APPROVAL_PORT")) is not None and str(pp).strip():
+        try:
+            cfg.portal.approval_bridge_port = int(str(pp).strip())
+        except ValueError:
+            pass
 
     cfg.signal.phone_number = (cfg.signal.phone_number or "").strip()
     cfg.signal.engagement_group_id = (cfg.signal.engagement_group_id or "").strip()

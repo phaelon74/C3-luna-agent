@@ -7,15 +7,68 @@
 #   - Runtime:     LLM_ENDPOINT points at a local OpenAI-compatible server
 #                  (TabbyAPI, vLLM, llama.cpp server, ...)
 #
-# Bring up (agent + sandbox + optional Plex + arr MCP sidecars; see INSTALL.md D):
+# Bring up (agent + sandbox + Code Mode portal + optional Plex + arr MCP sidecars; see INSTALL.md D):
 #   export DOCKER_GID=$(getent group docker | cut -d: -f3)
-#   docker compose build mose-sandbox mose-agent plex-ops-admin plex-stack-automation sonarr-diagnostics radarr-diagnostics
-#   docker compose up -d mose-sandbox mose-agent plex-ops-admin plex-stack-automation sonarr-diagnostics radarr-diagnostics
+#   docker compose build mose-sandbox mose-agent mose-mcp-portal mose-mcp-codemode-sandbox plex-ops-admin plex-stack-automation sonarr-diagnostics radarr-diagnostics
+#   docker compose up -d mose-sandbox mose-agent mose-mcp-portal mose-mcp-codemode-sandbox plex-ops-admin plex-stack-automation sonarr-diagnostics radarr-diagnostics
 #
 # Periodic skill review (run from a systemd timer on the host):
 #   docker compose run --rm mose-skill-review
 
 services:
+  # Code Mode: Deno isolate per `portal_codemode_execute` call (portal `docker exec`s here).
+  mose-mcp-codemode-sandbox:
+    build:
+      context: .
+      dockerfile: docker/mcp-codemode-sandbox/Dockerfile
+    container_name: mose-mcp-codemode-sandbox
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - mose-codemode-net
+    restart: unless-stopped
+
+  # MCP portal: aggregates upstream MCPs + WebSocket RPC for the Code Mode sandbox.
+  mose-mcp-portal:
+    build:
+      context: .
+      args:
+        DOCKER_GID: ${DOCKER_GID:-999}
+    container_name: mose-mcp-portal
+    # Idle container: mose-agent connects via `docker exec -i ... python -m mose_portal`.
+    # A long-running MCP process here would race the exec'd instance on RPC port 9001.
+    command: ["sleep", "infinity"]
+    depends_on:
+      mose-mcp-codemode-sandbox:
+        condition: service_started
+      plex-ops-admin:
+        condition: service_started
+      plex-stack-automation:
+        condition: service_started
+      sonarr-diagnostics:
+        condition: service_started
+      radarr-diagnostics:
+        condition: service_started
+    environment:
+      MCP_PORTAL_CONFIG: /app/mcp_servers.portal.json
+      MCP_PORTAL_RPC_HOST: mose-mcp-portal
+      MCP_PORTAL_RPC_PORT: "9001"
+      MCP_PORTAL_SANDBOX_CONTAINER: mose-mcp-codemode-sandbox
+      MCP_PORTAL_AGENT_APPROVAL_URL: http://mose-agent:9100/approve
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - mose-data:/app/data
+      - mose-workspace:/app/data/workspace
+    networks:
+      mose-codemode-net: {}
+      mose-net: {}
+    restart: unless-stopped
+
   # Isolated shell target. The agent `exec`s into this container instead of
   # running shell commands directly inside its own container.
   mose-sandbox:
@@ -76,7 +129,7 @@ services:
       TRAKT_CLIENT_SECRET: ${TRAKT_CLIENT_SECRET:-}
       # Defense in depth: Mose classifies mutating tools via mose/mcp_write_policy
       # and requires Signal admin approval. Leave upstream mutative ops OFF so a
-      # tool that bypasses use_tool can never appear on the wire.
+      # tool that bypasses policy (e.g. direct MCP) can never appear on the wire.
       PLEX_ENABLE_MUTATIVE_OPS: "false"
     restart: unless-stopped
 
@@ -118,16 +171,9 @@ services:
     depends_on:
       mose-sandbox:
         condition: service_healthy
-      # MCP stdio bridges: containers must exist BEFORE mose-agent calls
-      # `docker exec -i` during MCP init. Comment both out if you do not want
-      # the Plex sidecars.
-      plex-ops-admin:
-        condition: service_started
-      plex-stack-automation:
-        condition: service_started
-      sonarr-diagnostics:
-        condition: service_started
-      radarr-diagnostics:
+      # Code Mode: agent MCP is only mcp-portal (docker exec). Upstream sidecars
+      # are started by the portal service.
+      mose-mcp-portal:
         condition: service_started
     environment:
       TERMINAL_BACKEND: docker
@@ -143,6 +189,8 @@ services:
       SIGNAL_PHONE: ${SIGNAL_PHONE:-}
       SIGNAL_ENGAGEMENT_GROUP_ID: ${SIGNAL_ENGAGEMENT_GROUP_ID:-}
       SIGNAL_ADMIN_GROUP_ID: ${SIGNAL_ADMIN_GROUP_ID:-}
+      # Code Mode: POST /approve for mutating MCP (portal reaches this via mose-net).
+      MOSE_PORTAL_ENABLED: "1"
     # extra_hosts maps host.docker.internal on Linux (native on macOS/Windows).
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -156,7 +204,10 @@ services:
       # build time; for tighter deployments front the socket with a proxy.
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
+      # mose-net: outbound (LLM, sidecars). mose-codemode-net: portal posts to
+      # POST /approve here for mutating Code Mode MCP calls.
       - mose-net
+      - mose-codemode-net
     restart: unless-stopped
 
   # One-shot service: run a skill-quality review and exit. Invoked from a
@@ -197,6 +248,9 @@ services:
 networks:
   mose-net:
     driver: bridge
+  mose-codemode-net:
+    driver: bridge
+    internal: true
 
 volumes:
   mose-data:

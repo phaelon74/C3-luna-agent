@@ -438,26 +438,37 @@ Environment variables that override the file:
 
 ## D. MCP servers — Plex / Sonarr / Radarr (optional)
 
-MCP servers expose extra tools to the agent. The LLM calls them only through
-native tools `list_available_tools` and `use_tool` (see `mose/agent.py`).
+MCP servers expose extra tools to the agent. **Docker Compose (recommended):** the agent
+connects only to the **Code Mode portal** (`mcp-portal` in `mcp_servers.json`). The portal
+aggregates Plex, Sonarr, Radarr, and `paper_db` and exposes
+`mcp-portal__portal_codemode_search` and `mcp-portal__portal_codemode_execute`. See **D.7**.
 
-### D.0 Registry file
+### D.0 Registry files
+
+**Agent (`mose-agent`):** `mcp_servers.json` should list a single stdio bridge:
 
 ```bash
 cp mcp_servers.example.json mcp_servers.json
 ```
 
-**Docker Compose:** If `mcp_servers.json` exists in the build directory when you run `docker compose build`, it is copied into the agent image (`COPY . .`). If it is missing (e.g. CI), the Dockerfile copies `mcp_servers.example.json` to `mcp_servers.json` once. To override without rebuilding, bind-mount `./mcp_servers.json:/app/mcp_servers.json:ro` on `mose-agent`.
+`mcp_servers.example.json` contains only `mcp-portal` (`docker exec` into `mose-mcp-portal`).
 
-For no MCP servers at all, an empty config is fine:
+**Portal (`mose-mcp-portal`):** upstream MCPs are configured separately so the agent never
+loads dozens of tool schemas. Copy the portal template and mount or bake it as
+`mcp_servers.portal.json` (the container sets `MCP_PORTAL_CONFIG=/app/mcp_servers.portal.json`):
 
-```json
-{ "servers": {} }
+```bash
+cp mcp_servers.portal.example.json mcp_servers.portal.json
 ```
 
-If you use the Plex sidecars below, keep `mcp_servers.json` **free of secrets**:
-URLs and tokens live in the MCP container environment (`.env` → `docker-compose.yml`),
-and each image runs `/usr/local/bin/mcp-entrypoint`, which reads those variables.
+Edit that file to add or remove upstream servers (same shape as the old single-file layout).
+The Dockerfile seeds both `mcp_servers.json` and `mcp_servers.portal.json` from the
+`*.example.json` files when missing.
+
+**Docker Compose:** If these files exist in the build context when you run `docker compose build`,
+they are copied into the image (`COPY . .`). To override without rebuilding, bind-mount
+`./mcp_servers.json:/app/mcp_servers.json:ro` on `mose-agent` and
+`./mcp_servers.portal.json:/app/mcp_servers.portal.json:ro` on `mose-mcp-portal`.
 
 ### D.1 Gather Plex credentials (`PLEX_URL`, `PLEX_TOKEN`)
 
@@ -489,7 +500,7 @@ docker compose exec plex-ops-admin sh -lc \
 2. **`SONARR_API_KEY`** — Sonarr Web UI → **Settings → General** → **Security** →
    **API Key** (enable **Show Advanced** if needed). Regenerate if unknown.
 3. **Permissions:** Sonarr exposes one **full-access** API key; read and write API
-   routes share it. Network isolation plus Mose’s `use_tool` approval policy (section D.6)
+   routes share it. Network isolation plus Mose’s MCP write policy (section D.6)
    limit damage.
 4. **Check:**
 
@@ -598,45 +609,31 @@ docker compose up -d plex-ops-admin plex-stack-automation sonarr-diagnostics rad
 ```
 
 Then start or restart the agent as usual (section A.5). The agent image includes the
-**docker CLI** so it can stdio-bridge into those containers using `mcp_servers.json`
-entries like the ones in `mcp_servers.example.json`. `mose-agent` declares
-`depends_on` for each configured MCP sidecar (`plex-ops-admin`, `plex-stack-automation`,
-`sonarr-diagnostics`, `radarr-diagnostics`), so `docker compose up -d mose-agent` will also
-bring them up first — their containers must exist before the agent initializes
-MCP or those tools will silently disappear until the next agent restart.
+**docker CLI** so it can stdio-bridge into `mose-mcp-portal` using `mcp_servers.json`.
+`mose-agent` declares `depends_on: mose-mcp-portal`; the portal service starts the Plex
+and *arr* sidecars it needs. Those containers must exist before the agent initializes
+MCP or Code Mode tools will be missing until the next agent restart.
 
-**To disable the Plex MCP integration entirely:** comment out the
-`plex-ops-admin` and `plex-stack-automation` services **and** the matching
-`depends_on` lines under `mose-agent:` in `docker-compose.yml`, and remove the
-same entries from `mcp_servers.json`. Do the same for `sonarr-diagnostics` /
-`radarr-diagnostics` if you do not use the diagnostics sidecars.
+**To disable the Plex MCP integration entirely:** remove or trim upstream entries from
+`mcp_servers.portal.json` (portal) and/or stop the unused compose services.
 
-**Routing:** MCP containers use the default bridge (`mose-net`). Outbound connections
-to each upstream IP on `10.4.251.0/24` are forwarded and SNATed by the Docker host,
-same model as section A.5.3. There is **no shared “media host”** assumption — only
-per-service URLs in `.env`.
+**Routing:** MCP containers use the default bridge (`mose-net`). The Code Mode sandbox
+and portal RPC use the internal network `mose-codemode-net` (see **D.7**). Outbound
+connections from sidecars to your Plex/Sonarr/Radarr IPs are forwarded and SNATed by
+the Docker host, same model as section A.5.3.
 
-**Policy — reads vs writes:** For server names `plex-ops-admin`,
-`plex-stack-automation`, `sonarr-diagnostics`, and `radarr-diagnostics`, tools on the
-**read allowlist** in `mose/mcp_write_policy.py`
-run immediately. Every other tool on those servers requires the **same human approval**
-flow as `sre_execute` (Signal **admin** group with `SIGNAL_ADMIN_GROUP_ID`, 60 second
-timeout). If no approval callback is configured (e.g. half-configured CLI), mutating
-MCP calls (whether invoked as `server__tool` directly or via `use_tool`) are **denied**.
-Other MCP servers (e.g. `paper_db`) are not gated by this policy.
+**Policy — reads vs writes:** For aggregated tools on `plex-ops-admin`,
+`plex-stack-automation`, `sonarr-diagnostics`, and `radarr-diagnostics`, the **read allowlist**
+in `mose/mcp_write_policy.py` runs immediately. Every other tool on those servers requires
+the **same human approval** flow as `sre_execute` (Signal **admin** group with
+`SIGNAL_ADMIN_GROUP_ID`, or CLI/Discord approval). If no approval callback is configured,
+mutating MCP calls from Code Mode are **denied** at the portal. Other upstream servers
+(e.g. `paper_db`) follow the same classifier where applicable.
 
-**Inlining MCP tools:** With `inline_mcp_tools = true` in `[agent]` in `config.toml`
-(default on), every connected MCP tool is merged into the main LLM tool list as
-`server__tool` functions — **prefer those** over `bash`/`curl` to Plex, Sonarr, or
-Radarr (credentials live only in the MCP sidecars). Set `inline_mcp_tools = false`
-to hide MCP tools from that list and rely on `list_available_tools` / `use_tool`
-only. Optional `inline_mcp_servers` can list a subset, for example
-`["plex-ops-admin", "plex-stack-automation", "sonarr-diagnostics", "radarr-diagnostics"]`
-(see `config.toml` comments). Omit or leave empty to inline *all* connected MCP servers.
-If the merged
-tool count exceeds `inline_mcp_tools_soft_cap`, the agent logs `tool_list_over_cap`
-once per chat session — raise the cap or narrow `inline_mcp_servers` if your LLM
-backend struggles with large tool payloads.
+**MCP tool list:** With Code Mode, the LLM normally sees only the two portal tools plus
+native builtins (`mose/agent.py`). Use `portal_codemode_search` then `portal_codemode_execute`
+(see **D.7**). Optional `inline_mcp_servers` in `config.toml` can still restrict which
+MCP servers are merged if you attach additional stdio MCPs locally.
 
 **Which server when:** [vladimir-tutin/plex-mcp-server](https://github.com/vladimir-tutin/plex-mcp-server)
 (`plex-ops-admin`) covers broad Plex operations including playback and server maintenance.
@@ -645,6 +642,30 @@ backend struggles with large tool payloads.
 [`sonarr-diagnostics`](docker/arr-diagnostics/) and [`radarr-diagnostics`](docker/arr-diagnostics/)
 provide detailed *arr API v3 diagnostics (queue, imports, logs, commands) without expanding
 niavasha’s surface area.
+
+### D.7 MCP Portal (Code Mode)
+
+The `mose-mcp-portal` container holds **no long-running MCP process by default**
+(`sleep infinity`). The agent opens a stdio session with
+`docker exec -i mose-mcp-portal python -m mose_portal`, which starts the FastMCP server,
+loads upstream MCPs from `MCP_PORTAL_CONFIG` (default `/app/mcp_servers.portal.json`),
+and binds the WebSocket RPC server (default port **9001**) for the Deno sandbox.
+
+**Topology**
+
+- `mose-agent` → (stdio) → `mcp-portal` tools `portal_codemode_search` / `portal_codemode_execute`.
+- `mose-mcp-portal` → (stdio) → Plex / *arr* / `paper_db` sidecars and subprocesses.
+- `mose-mcp-codemode-sandbox` → (WebSocket) → `mose-mcp-portal:9001` only; no outbound internet.
+
+**Approval bridge:** Mutating MCP calls from sandbox code hit `POST /approve` on
+`mose-agent` (default port **9100**, bind `0.0.0.0`). Compose sets
+`MOSE_PORTAL_ENABLED=1` and `MCP_PORTAL_AGENT_APPROVAL_URL=http://mose-agent:9100/approve`.
+Configure `[portal]` in `config.toml` or the `MOSE_PORTAL_*` env vars for non-compose setups.
+
+**Adding an upstream MCP:** Edit `mcp_servers.portal.json` (or the mounted equivalent) and
+restart the stack so the portal reconnects. Do **not** add the portal to its own config
+(that would recurse). The agent’s `mcp_servers.json` should keep only the `mcp-portal` entry
+unless you are running a custom multi-server dev setup.
 
 ---
 
@@ -847,7 +868,7 @@ agent's only outputs — an operator must review and action them.
   diagnostic commands only). Anything that changes state must go through
   `sre_execute`, which requires explicit human approval via Signal or CLI.
 - **Plex MCP sidecars.** For `plex-ops-admin` and `plex-stack-automation`, mutating
-  `use_tool` calls use the **same approval channel** as `sre_execute` (Signal admin
+  Code Mode / MCP tool calls use the **same approval channel** as `sre_execute` (Signal admin
   group when Signal is configured). Read-only tools on the allowlist in
   `mose/mcp_write_policy.py` run without a prompt. Unknown tools default to **deny
   until approved**. The agent container mounts the Docker socket to run
@@ -881,9 +902,9 @@ agent's only outputs — an operator must review and action them.
 | Signal bot won't connect | `signal-cli-daemon` down or not linked | `systemctl status signal-cli-daemon`; re-link if needed |
 | Skill proposals never arrive on Signal | Group ids wrong or bot not in admin group | Set `SIGNAL_ADMIN_GROUP_ID`, add the linked device to that group, restart the agent |
 | Skill review timer never fires | Timer not enabled | `sudo systemctl enable --now mose-skill-review.timer && systemctl list-timers 'mose-*'` |
-| Mutating Plex MCP `use_tool` always denied | No approval callback (CLI / missing Signal admin) | Configure `SIGNAL_ADMIN_GROUP_ID` and run with Signal (section E), or use CLI / Discord where approval is wired |
+| Mutating Plex MCP calls always denied | No approval callback (CLI / missing Signal admin) | Configure `SIGNAL_ADMIN_GROUP_ID` and run with Signal (section E), or use CLI / Discord where approval is wired |
 | Admin never sees MCP approval prompt | Wrong admin group id or linked device not in admin group | Fix `SIGNAL_ADMIN_GROUP_ID`, add the linked device to the admin group, restart the agent |
-| `docker exec` MCP connection fails | Sidecars not running or wrong container name in `mcp_servers.json` | `docker compose ps`; names must match `mose-plex-ops-admin` / `mose-plex-stack-automation` |
+| `docker exec` MCP connection fails | `mose-mcp-portal` not running, wrong container name in `mcp_servers.json`, or portal upstreams down | `docker compose ps`; agent expects `mose-mcp-portal`; portal uses `mcp_servers.portal.json` (D.0 / D.7) |
 
 ---
 

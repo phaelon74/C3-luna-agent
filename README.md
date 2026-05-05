@@ -203,8 +203,8 @@ Built-in tools that don't require external MCP servers:
 | `delegate` | Hand off a self-contained subtask to a sub-agent with its own tool loop |
 | `code_task` | Delegate a coding task to a sub-agent with a write-run-fix loop |
 | `summarize_paper` | Fetch and summarize an arXiv paper |
-| `list_available_tools` | Discover MCP tools available from connected servers |
-| `use_tool` | Call a specific MCP tool by name |
+
+**MCP (Code Mode):** With the portal, the LLM uses `mcp-portal__portal_codemode_search` and `mcp-portal__portal_codemode_execute` (see INSTALL.md D.7) instead of dozens of per-server tools.
 
 **Bash safety:** Commands are checked against blocked patterns before execution:
 - `rm -rf /`, `mkfs`, `dd if=`, `shutdown`, `reboot`, fork bombs, writes to `/dev/sda`

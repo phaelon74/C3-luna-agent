@@ -31,17 +31,14 @@ workspace = "data/workspace"
 allow_read_outside = true
 skills_path = "skills"
 recent_messages_limit = 15
-# Merge MCP tool schemas into the main LLM tool list (main agent only). See INSTALL.md §D.
-inline_mcp_tools = true
-# Restrict inlining to named MCP servers only. Homelab default when Plex + niavasha + arr diagnostics run:
-# inline_mcp_servers = [
-#   "plex-ops-admin",
-#   "plex-stack-automation",
-#   "sonarr-diagnostics",
-#   "radarr-diagnostics",
-# ]
+# Merge MCP tool schemas into the main LLM tool list when MCP servers are configured.
+# With Code Mode, `mcp_servers.json` should define only `mcp-portal` (two tools). The
+# `inline_mcp_tools` flag is legacy and ignored by the agent — MCP tools are always merged.
+inline_mcp_tools = false
+# Restrict merged tools to named MCP servers only (optional). Example:
+# inline_mcp_servers = ["mcp-portal"]
 # inline_mcp_servers = []
-# With all five servers inlined, tool count exceeds 80 — raise cap or omit servers you do not need.
+# Legacy soft cap (no longer enforced; kept for operator reference).
 inline_mcp_tools_soft_cap = 200
 
 [terminal]
@@ -69,6 +66,14 @@ review_startup_delay_seconds = 300
 # The admin is notified and the build auto-starts after this delay unless
 # they reply "stop <slug>" or "cancel <slug>". Default: 15 minutes.
 build_grace_window_seconds = 900
+
+[portal]
+# When enabled, mose-agent listens on approval_bridge_port for POST /approve (Code Mode mutating MCP).
+enabled = false
+approval_bridge_host = "0.0.0.0"
+approval_bridge_port = 9100
+code_timeout_seconds = 30
+code_max_timeout = 120
 
 [observe]
 log_dir = "data/logs"
