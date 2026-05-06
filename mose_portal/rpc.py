@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -152,19 +153,51 @@ class CodeModeRPC:
             started.set()
             await stop.wait()
 
+    async def _try_bind(self, host: str, port: int) -> bool:
+        """Spawn ``_serve_loop`` and wait until it's either listening or it fails."""
+        started = asyncio.Event()
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            self._serve_loop(host, port, started, stop),
+            name="mose_portal_codemode_rpc",
+        )
+        # Race: server signals ``started``, OR the task ends (bind failure).
+        wait_started: asyncio.Task[bool] = asyncio.create_task(started.wait())
+        done, _pending = await asyncio.wait(
+            {wait_started, task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if started.is_set():
+            wait_started.cancel()
+            self._serve_task = task
+            self._stop_event = stop
+            return True
+        # Task ended before listen — re-raise its exception (or signal generic failure).
+        wait_started.cancel()
+        try:
+            task.result()
+        except OSError as e:
+            if e.errno == errno.EADDRINUSE:
+                return False
+            raise
+        return False
+
     async def start(self, host: str = "0.0.0.0", port: int = 9001) -> None:
         if self._serve_task is not None:
             return
         self._bound_host = host
         self._bound_port = port
-        started = asyncio.Event()
-        self._stop_event = asyncio.Event()
-        self._serve_task = asyncio.create_task(
-            self._serve_loop(host, port, started, self._stop_event),
-            name="mose_portal_codemode_rpc",
-        )
-        await started.wait()
-        log.info("codemode_rpc_listen host=%s port=%s", host, port)
+        if await self._try_bind(host, port):
+            log.info("codemode_rpc_listen host=%s port=%s", host, port)
+            return
+        # Port in use — fall back to an ephemeral port so concurrent portal
+        # processes (e.g. diagnostics, second agent) don't deadlock.
+        log.warning("codemode_rpc_port_in_use port=%s; using ephemeral port", port)
+        if not await self._try_bind(host, 0):
+            raise RuntimeError("Could not bind Code Mode RPC server (no free port)")
+        actual = self.listen_port
+        self._bound_port = actual
+        log.info("codemode_rpc_listen host=%s port=%s (ephemeral)", host, actual)
 
     async def stop(self) -> None:
         if self._stop_event is not None:

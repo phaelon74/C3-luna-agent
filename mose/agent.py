@@ -145,10 +145,10 @@ Fix and retry; do not guess.
 User asks: "what's currently playing on Plex?"
 1. ``mcp-portal__portal_codemode_search`` with query ``active plex sessions`` → finds ``sessions_get_active``.
 2. ``mcp-portal__portal_codemode_execute`` with code:
-   ``const sessions = await mcp.plex_ops_admin.sessions_get_active({});``
-   ``for (const s of sessions.MediaContainer?.Metadata ?? []) {``
-   ``  console.log(`${s.User?.title}: ${s.title} (${s.Player?.title})`);``
-   ``}``
+   ``const sessions = await mcp.plex_ops_admin.sessions_get_active({{}});``
+   ``for (const s of sessions.MediaContainer?.Metadata ?? []) {{``
+   ``  console.log(`${{s.User?.title}}: ${{s.title}} (${{s.Player?.title}})`);``
+   ``}}``
 
 Always prefer Code Mode over ``bash``/``curl`` for these systems — credentials and approval policy live in the portal, not in the shell.
 

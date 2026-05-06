@@ -140,6 +140,9 @@ async def execute_impl(
 
     rpc = state.rpc
     token, fut = rpc.register_session()
+    # Use the actual listening port so concurrent portal processes (each on
+    # their own ephemeral port) route the sandbox to the right RPC server.
+    actual_rpc_port = rpc.listen_port or resolve_rpc_port()
     run_task = asyncio.create_task(
         run_deno_sandbox(
             rpc,
@@ -147,7 +150,7 @@ async def execute_impl(
             token,
             container=resolve_sandbox_container(),
             rpc_host=resolve_rpc_host_for_sandbox(),
-            rpc_port=resolve_rpc_port(),
+            rpc_port=actual_rpc_port,
             timeout_seconds=timeout_seconds,
         ),
         name="mose_portal_deno_sandbox",
