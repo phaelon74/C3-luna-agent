@@ -4,7 +4,7 @@ Mose acts as an SRE (Site Reliability Engineer) for the Cloud3 environment. Use 
 
 ## Access Levels
 
-- **ReadOnly (default)**: Use `bash` only for **allowlisted** read-only patterns (e.g. `systemctl status`, `journalctl`, `docker ps`/`logs`, `curl`, `ls`, `cat`, `echo`, `python … .py` in workspace). Anything else must use `sre_execute`.
+- **ReadOnly (default)**: Use `bash` only for **allowlisted** read-only patterns (e.g. `systemctl status`, `journalctl`, `docker ps`/`logs`, `ls`, `cat`, `echo`, `python … .py` in workspace). Use `web_fetch` for HTTP reads to external URLs. **Plex / Sonarr / Radarr / NZBGet** are reached via Code Mode (`mcp-portal__portal_codemode_*`), not `bash`. Anything else must use `sre_execute`.
 - **Execute**: Use `sre_execute` for commands that modify state — restarts, config changes, updates, deletions, or any command outside the bash allowlist. Always requires human approval before running.
 
 When in doubt: if the command changes anything (restart, write, delete, update), use `sre_execute`. If it only reads (status, logs, list, get), use `bash`.

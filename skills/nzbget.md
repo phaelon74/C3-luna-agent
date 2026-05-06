@@ -1,90 +1,79 @@
-# NZBGet (Usenet Downloader)
+# NZBGet (Usenet downloader)
 
-## Connection
+Mose reaches NZBGet **only** through the MCP portal (Code Mode), not `bash`/`curl`.
 
-- Port: 6789 (web UI)
-- JSON-RPC: http://<host>:6789/jsonrpc
-- Password env var: `NZBGET_PASSWORD`
-- Auth: Basic auth or `Username: nzbget` + `Password: $NZBGET_PASSWORD`
+## Discovery
 
-## ReadOnly Runbooks
+1. `mcp-portal__portal_codemode_search` with e.g. `query="nzbget queue listgroups"`
+2. `mcp-portal__portal_codemode_execute` with TypeScript calling `mcp.nzbget_diagnostics.<tool>(...)`
 
-Use `bash` for these — no approval required.
+Server key: `nzbget_diagnostics` (hyphens in compose name become underscores in TS).
+
+## Read-only examples
 
 ### Status
-```bash
-curl -s -u "nzbget:$NZBGET_PASSWORD" \
-  -d '{"method":"status"}' \
-  -H "Content-Type: application/json" \
-  "http://localhost:6789/jsonrpc"
+
+```ts
+const s = await mcp.nzbget_diagnostics.nzbget_status({});
+console.log(JSON.stringify(s, null, 2));
 ```
 
-### List Groups (Queue)
-```bash
-curl -s -u "nzbget:$NZBGET_PASSWORD" \
-  -d '{"method":"listgroups"}' \
-  -H "Content-Type: application/json" \
-  "http://localhost:6789/jsonrpc"
+### Queue groups (summary per NZB)
+
+```ts
+const g = await mcp.nzbget_diagnostics.nzbget_listgroups({});
+console.log(JSON.stringify(g, null, 2));
 ```
 
-### History
-```bash
-curl -s -u "nzbget:$NZBGET_PASSWORD" \
-  -d '{"method":"history"}' \
-  -H "Content-Type: application/json" \
-  "http://localhost:6789/jsonrpc"
+### Files in one NZB (use `NZBID` from `listgroups`; `0` = all groups)
+
+```ts
+const f = await mcp.nzbget_diagnostics.nzbget_listfiles({ NZBID: 123 });
+console.log(JSON.stringify(f, null, 2));
 ```
 
-### Log
-```bash
-curl -s -u "nzbget:$NZBGET_PASSWORD" \
-  -d '{"method":"log"}' \
-  -H "Content-Type: application/json" \
-  "http://localhost:6789/jsonrpc"
+### History / log / config (passwords redacted in config)
+
+```ts
+const h = await mcp.nzbget_diagnostics.nzbget_history({ Hidden: false });
+console.log(JSON.stringify(h, null, 2));
+
+const log = await mcp.nzbget_diagnostics.nzbget_log({ IDFrom: 0, NumberOfEntries: 50 });
+console.log(JSON.stringify(log, null, 2));
+
+const cfg = await mcp.nzbget_diagnostics.nzbget_config({});
+console.log(JSON.stringify(cfg, null, 2));
 ```
 
-### Config
-```bash
-curl -s -u "nzbget:$NZBGET_PASSWORD" \
-  -d '{"method":"config"}' \
-  -H "Content-Type: application/json" \
-  "http://localhost:6789/jsonrpc"
+### News servers (from `status`) and volume stats
+
+```ts
+const ns = await mcp.nzbget_diagnostics.nzbget_serverversions({});
+console.log(JSON.stringify(ns, null, 2));
+
+const vol = await mcp.nzbget_diagnostics.nzbget_servervolumes({});
+console.log(JSON.stringify(vol, null, 2));
 ```
 
-## Execute Runbooks
+## Mutations (admin approval)
 
-Use `sre_execute` for these — requires human approval.
+Deleting a group, changing priority, appending an NZB, pausing the queue, etc. require the
+normal **portal mutation approval** flow (Signal/Discord admin channel).
 
-### Pause/Resume
-```bash
-# Pause
-curl -s -u "nzbget:$NZBGET_PASSWORD" \
-  -d '{"method":"pausedownload"}' \
-  -H "Content-Type: application/json" \
-  "http://localhost:6789/jsonrpc"
+Examples:
 
-# Resume
-curl -s -u "nzbget:$NZBGET_PASSWORD" \
-  -d '{"method":"resumedownload"}' \
-  -H "Content-Type: application/json" \
-  "http://localhost:6789/jsonrpc"
+```ts
+// Delete queue group(s) — approval required
+const r = await mcp.nzbget_diagnostics.nzbget_editqueue_delete({ NZBIDs: [42], final_delete: false });
+console.log(JSON.stringify(r, null, 2));
+
+// Global pause — approval required
+const p = await mcp.nzbget_diagnostics.nzbget_pause_global({});
+console.log(JSON.stringify(p, null, 2));
 ```
 
-### Edit Queue
-```bash
-# Use editqueue method - consult NZBGet JSON-RPC docs
-```
+## Environment (sidecar)
 
-### Reload
-```bash
-curl -s -u "nzbget:$NZBGET_PASSWORD" \
-  -d '{"method":"reload"}' \
-  -H "Content-Type: application/json" \
-  "http://localhost:6789/jsonrpc"
-```
+- `NZBGET_HOST`, `NZBGET_PORT` (default 6789), `NZBGET_USERNAME`, `NZBGET_PASSWORD`, `NZBGET_USE_HTTPS`
 
-### Restart Service
-```bash
-systemctl restart nzbget
-# or: docker restart nzbget
-```
+See `INSTALL.md` **D.7** and `docker-compose.yml` service `nzbget-diagnostics`.

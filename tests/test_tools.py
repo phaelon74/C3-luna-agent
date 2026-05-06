@@ -156,13 +156,19 @@ class TestBackendTargetBlock:
         assert is_backend_target('curl -H "X-Plex-Token: $PLEX_TOKEN" http://localhost:32400/status/sessions')
         assert is_backend_target('curl -H "X-Api-Key: $SONARR_API_KEY" http://localhost:8989/api/v3/queue')
         assert is_backend_target('wget http://radarr:7878/api/v3/movie')
+        assert is_backend_target('curl -s -u "nzbget:$NZBGET_PASSWORD" http://localhost:6789/jsonrpc')
+        assert is_backend_target("curl http://10.0.0.1:6789/jsonrpc")
 
     def test_arr_api_path_blocked_even_without_known_port(self):
         assert is_backend_target('curl http://internal-host/api/v3/queue')
 
+    def test_nzbget_env_var_blocked(self):
+        assert is_backend_target('echo $NZBGET_PASSWORD')
+
     def test_docker_exec_into_mcp_sidecars_blocked(self):
         assert is_backend_target("docker exec -i mose-plex-ops-admin /usr/local/bin/mcp-entrypoint")
         assert is_backend_target("docker exec mose-mcp-portal sh")
+        assert is_backend_target("docker exec -i mose-nzbget-diagnostics /usr/local/bin/mcp-entrypoint-nzbget")
 
     def test_benign_commands_allowed(self):
         assert not is_backend_target("ls /app")

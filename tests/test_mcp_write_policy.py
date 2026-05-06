@@ -78,6 +78,23 @@ def test_use_tool_needs_approval() -> None:
     assert use_tool_needs_approval("sonarr-diagnostics__sonarr_get_queue") is False
     assert use_tool_needs_approval("sonarr-diagnostics__sonarr_command_RssSync") is True
     assert use_tool_needs_approval("radarr-diagnostics__radarr_post_system_restart") is True
+    assert use_tool_needs_approval("nzbget-diagnostics__nzbget_listgroups") is False
+    assert use_tool_needs_approval("nzbget-diagnostics__nzbget_append") is True
     assert use_tool_needs_approval("paper_db__foo") is False
     assert use_tool_needs_approval("notnamespaced") is True
     assert use_tool_needs_approval("plex-ops-admin__") is True
+
+
+@pytest.mark.parametrize(
+    "bare,expected",
+    [
+        ("nzbget_status", "read"),
+        ("nzbget_listfiles", "read"),
+        ("nzbget_editqueue_delete", "write"),
+        ("nzbget_pause_global", "write"),
+        ("nzbget_append", "write"),
+        ("nzbget_unknown_tool", "write"),
+    ],
+)
+def test_nzbget_diagnostics(bare: str, expected: str) -> None:
+    assert classify_mcp_tool("nzbget-diagnostics", bare) == expected

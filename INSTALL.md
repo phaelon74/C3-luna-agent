@@ -641,7 +641,8 @@ MCP servers are merged if you attach additional stdio MCPs locally.
 (`plex-stack-automation`) adds Sonarr/Radarr and analytics-style Plex tools.
 [`sonarr-diagnostics`](docker/arr-diagnostics/) and [`radarr-diagnostics`](docker/arr-diagnostics/)
 provide detailed *arr API v3 diagnostics (queue, imports, logs, commands) without expanding
-niavasha’s surface area.
+niavasha’s surface area. [`nzbget-diagnostics`](docker/nzbget-diagnostics/) exposes NZBGet
+JSON-RPC (queue, history, logs, mutating queue control with approval).
 
 ### D.7 MCP Portal (Code Mode)
 
@@ -654,7 +655,7 @@ and binds the WebSocket RPC server (default port **9001**) for the Deno sandbox.
 **Topology**
 
 - `mose-agent` → (stdio) → `mcp-portal` tools `portal_codemode_search` / `portal_codemode_execute`.
-- `mose-mcp-portal` → (stdio) → Plex / *arr* / `paper_db` sidecars and subprocesses.
+- `mose-mcp-portal` → (stdio) → Plex / *arr* / NZBGet / `paper_db` sidecars and subprocesses.
 - `mose-mcp-codemode-sandbox` → (WebSocket) → `mose-mcp-portal:9001` only; no outbound internet.
 
 **Approval bridge:** Mutating MCP calls from sandbox code hit `POST /approve` on
@@ -666,6 +667,20 @@ Configure `[portal]` in `config.toml` or the `MOSE_PORTAL_*` env vars for non-co
 restart the stack so the portal reconnects. Do **not** add the portal to its own config
 (that would recurse). The agent’s `mcp_servers.json` should keep only the `mcp-portal` entry
 unless you are running a custom multi-server dev setup.
+
+**NZBGet sidecar (`nzbget-diagnostics`):** First-party JSON-RPC MCP in
+[`docker/nzbget-diagnostics/`](docker/nzbget-diagnostics/). Add the service with compose,
+set `NZBGET_HOST`, `NZBGET_PASSWORD`, and optionally `NZBGET_PORT` / `NZBGET_USERNAME` /
+`NZBGET_USE_HTTPS` in `.env` (see `.env.example`). The portal must list
+`nzbget-diagnostics` in `mcp_servers.portal.json` (seeded from
+`mcp_servers.portal.example.json`). From Code Mode, tools are `mcp.nzbget_diagnostics.*`
+(e.g. `nzbget_listgroups`, `nzbget_listfiles`).
+
+Smoke test from the host (after `docker compose up -d nzbget-diagnostics`):
+
+```bash
+docker exec mose-nzbget-diagnostics python -m nzbget_diagnostics --selftest
+```
 
 ---
 

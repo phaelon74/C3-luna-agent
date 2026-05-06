@@ -1,6 +1,6 @@
 """Classify MCP tools for gated MCP servers: read-only vs requires human approval.
 
-Servers in ``PROTECTED_MCP_SERVERS`` (Plex sidecars, Sonarr/Radarr diagnostics)
+Servers in ``PROTECTED_MCP_SERVERS`` (Plex sidecars, *arr diagnostics, NZBGet)
 use per-server read allowlists. Other MCP servers (e.g. paper_db) are left
 unrestricted so existing installs keep working.
 """
@@ -15,6 +15,7 @@ PROTECTED_MCP_SERVERS = frozenset({
     "plex-stack-automation",
     "sonarr-diagnostics",
     "radarr-diagnostics",
+    "nzbget-diagnostics",
 })
 
 # vladimir-tutin/plex-mcp-server — read-only tools (everything else needs approval).
@@ -148,11 +149,25 @@ _RADARR_DIAG_READS: frozenset[str] = frozenset({
     "radarr_get_downloadclient",
 })
 
+# docker/nzbget-diagnostics — read-only JSON-RPC tools (mutations require approval).
+_NZBGET_DIAG_READS: frozenset[str] = frozenset({
+    "nzbget_status",
+    "nzbget_version",
+    "nzbget_listgroups",
+    "nzbget_listfiles",
+    "nzbget_history",
+    "nzbget_log",
+    "nzbget_config",
+    "nzbget_serverversions",
+    "nzbget_servervolumes",
+})
+
 _READ_BY_SERVER: dict[str, frozenset[str]] = {
     "plex-ops-admin": _PLEX_OPS_READS,
     "plex-stack-automation": _PLEX_STACK_READS,
     "sonarr-diagnostics": _SONARR_DIAG_READS,
     "radarr-diagnostics": _RADARR_DIAG_READS,
+    "nzbget-diagnostics": _NZBGET_DIAG_READS,
 }
 
 

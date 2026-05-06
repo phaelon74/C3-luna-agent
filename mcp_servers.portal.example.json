@@ -44,6 +44,16 @@
         "/usr/local/bin/mcp-entrypoint-radarr"
       ],
       "transport": "stdio"
+    },
+    "nzbget-diagnostics": {
+      "command": "docker",
+      "args": [
+        "exec",
+        "-i",
+        "mose-nzbget-diagnostics",
+        "/usr/local/bin/mcp-entrypoint-nzbget"
+      ],
+      "transport": "stdio"
     }
   }
 }

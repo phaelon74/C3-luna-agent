@@ -165,7 +165,7 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
             "description": (
                 "Execute a read-only shell command on THIS host (status, logs, docker ps/logs, ls, cat, grep, find, etc.). "
                 "DOES NOT support curl/wget — use ``web_fetch`` for external URLs and ``mcp-portal__portal_codemode_execute`` "
-                "for backend systems (Plex / Sonarr / Radarr / paper_db). For state-changing local commands, use ``sre_execute``."
+                "for backend systems (Plex / Sonarr / Radarr / NZBGet / paper_db). For state-changing local commands, use ``sre_execute``."
             ),
             "parameters": {
                 "type": "object",

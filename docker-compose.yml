@@ -9,8 +9,8 @@
 #
 # Bring up (agent + sandbox + Code Mode portal + optional Plex + arr MCP sidecars; see INSTALL.md D):
 #   export DOCKER_GID=$(getent group docker | cut -d: -f3)
-#   docker compose build mose-sandbox mose-agent mose-mcp-portal mose-mcp-codemode-sandbox plex-ops-admin plex-stack-automation sonarr-diagnostics radarr-diagnostics
-#   docker compose up -d mose-sandbox mose-agent mose-mcp-portal mose-mcp-codemode-sandbox plex-ops-admin plex-stack-automation sonarr-diagnostics radarr-diagnostics
+#   docker compose build mose-sandbox mose-agent mose-mcp-portal mose-mcp-codemode-sandbox plex-ops-admin plex-stack-automation sonarr-diagnostics radarr-diagnostics nzbget-diagnostics
+#   docker compose up -d mose-sandbox mose-agent mose-mcp-portal mose-mcp-codemode-sandbox plex-ops-admin plex-stack-automation sonarr-diagnostics radarr-diagnostics nzbget-diagnostics
 #
 # Periodic skill review (run from a systemd timer on the host):
 #   docker compose run --rm mose-skill-review
@@ -53,6 +53,8 @@ services:
       sonarr-diagnostics:
         condition: service_started
       radarr-diagnostics:
+        condition: service_started
+      nzbget-diagnostics:
         condition: service_started
     environment:
       MCP_PORTAL_CONFIG: /app/mcp_servers.portal.json
@@ -159,6 +161,22 @@ services:
     environment:
       RADARR_URL: ${RADARR_URL:-}
       RADARR_API_KEY: ${RADARR_API_KEY:-}
+    restart: unless-stopped
+
+  # NZBGet JSON-RPC MCP — queue / history / diagnostics (Usenet downloader).
+  nzbget-diagnostics:
+    build:
+      context: .
+      dockerfile: docker/nzbget-diagnostics/Dockerfile
+    container_name: mose-nzbget-diagnostics
+    networks:
+      - mose-net
+    environment:
+      NZBGET_HOST: ${NZBGET_HOST:-}
+      NZBGET_PORT: ${NZBGET_PORT:-6789}
+      NZBGET_USERNAME: ${NZBGET_USERNAME:-nzbget}
+      NZBGET_PASSWORD: ${NZBGET_PASSWORD:-}
+      NZBGET_USE_HTTPS: ${NZBGET_USE_HTTPS:-false}
     restart: unless-stopped
 
   # Main agent. Runs as the non-root `mose` user inside the image.
