@@ -19,21 +19,31 @@ MAX_MESSAGE_LENGTH = 2000  # Discord's limit
 
 _approval_ctx: ContextVar[dict] = ContextVar("approval_ctx", default={})
 
+# Cross-task fallback for the portal /approve HTTP bridge — see signal_bot for
+# the same pattern. aiohttp runs its handler in a separate task so ContextVar
+# isn't visible. Single-user homelab assumption.
+_last_approval_ctx: dict = {}
+
 
 def set_approval_context(channel, author, bot) -> None:
     """Set context for sre_execute approval (channel, author, bot)."""
-    _approval_ctx.set({"channel": channel, "author": author, "bot": bot})
+    global _last_approval_ctx
+    ctx = {"channel": channel, "author": author, "bot": bot}
+    _approval_ctx.set(ctx)
+    _last_approval_ctx = ctx
 
 
 async def _discord_approval_callback(command: str, reason: str, target_system: str) -> bool:
     """Prompt user for approval via Discord message. Waits for reply (y/yes/approve) within 60s."""
-    ctx = _approval_ctx.get()
+    ctx = _approval_ctx.get() or _last_approval_ctx
     if not ctx:
+        log_event(logger, "discord_approval_no_context", target_system=target_system)
         return False
     channel = ctx.get("channel")
     author = ctx.get("author")
     bot = ctx.get("bot")
     if not all([channel, author, bot]):
+        log_event(logger, "discord_approval_partial_context", target_system=target_system)
         return False
 
     title = "MCP Tool Approval" if target_system.startswith("mcp:") else "SRE Execute Approval"

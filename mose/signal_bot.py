@@ -19,6 +19,13 @@ MAX_MESSAGE_LENGTH = 4000  # Practical limit for Signal readability
 
 _approval_ctx: ContextVar[dict] = ContextVar("signal_approval_ctx", default={})
 
+# Cross-task fallback for the portal /approve HTTP bridge: aiohttp runs its
+# handler in a different task than the agent loop, so the ContextVar above
+# isn't visible there. We mirror the most recently set context here so the
+# bridge can find the bot. Single-admin homelab assumption — for multi-admin
+# we'd key this by session id and forward the id through the portal.
+_last_approval_ctx: dict = {}
+
 # Set by MoseSignalBot.start(); used by the proactive proposal/review callbacks
 # which are invoked outside any specific incoming-message context.
 _active_bot: "MoseSignalBot | None" = None
@@ -318,17 +325,22 @@ async def _handle_skill_approval_reply(bot: "MoseSignalBot", group_id: str, text
 
 def set_approval_context(incoming_group_id: str, bot: "MoseSignalBot") -> None:
     """Set context for sre_execute approval (incoming Signal group id, bot)."""
-    _approval_ctx.set({"incoming_group_id": incoming_group_id, "bot": bot})
+    global _last_approval_ctx
+    ctx = {"incoming_group_id": incoming_group_id, "bot": bot}
+    _approval_ctx.set(ctx)
+    _last_approval_ctx = ctx
 
 
 async def _signal_approval_callback(command: str, reason: str, target_system: str) -> bool:
     """Prompt admin group for approval. Waits for reply (y/yes/approve) within 60s."""
-    ctx = _approval_ctx.get()
+    ctx = _approval_ctx.get() or _last_approval_ctx
     if not ctx:
+        log_event(logger, "signal_approval_no_context", target_system=target_system)
         return False
     incoming = ctx.get("incoming_group_id")
     bot = ctx.get("bot")
     if not incoming or not bot:
+        log_event(logger, "signal_approval_partial_context", target_system=target_system)
         return False
 
     admin_gid = (bot.config.admin_group_id or "").strip()
