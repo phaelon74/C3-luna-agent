@@ -131,6 +131,26 @@ async function main(): Promise<void> {
     }
   };
 
+  // Upstream MCP servers return `content[].text` which is almost always a
+  // JSON-encoded string. The portal aggregator forwards the raw string here.
+  // Auto-parse so `await mcp.x.y(args)` resolves to the object the LLM (and
+  // mcp.d.ts) expect — otherwise property access silently yields undefined.
+  function maybeParseJson(value: unknown): unknown {
+    if (typeof value !== "string") return value;
+    const trimmed = value.trim();
+    if (!trimmed) return value;
+    const first = trimmed[0];
+    if (first !== "{" && first !== "[" && first !== '"' && first !== "-" && (first < "0" || first > "9") &&
+        trimmed !== "true" && trimmed !== "false" && trimmed !== "null") {
+      return value;
+    }
+    try {
+      return JSON.parse(trimmed);
+    } catch (_e) {
+      return value;
+    }
+  }
+
   async function rpcCall(
     serverTs: string,
     tool: string,
@@ -141,7 +161,7 @@ async function main(): Promise<void> {
     return await new Promise((resolve, reject) => {
       pending.set(id, (m) => {
         pending.delete(id);
-        if (m.ok === true) resolve(m.result);
+        if (m.ok === true) resolve(maybeParseJson(m.result));
         else reject(new Error(String(m.error ?? "MCP call failed")));
       });
       ws.send(JSON.stringify(msg));
