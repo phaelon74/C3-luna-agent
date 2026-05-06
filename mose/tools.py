@@ -9,7 +9,13 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
-from mose.bash_policy import bash_rejection_message, is_bash_allowlisted, is_dangerous_command
+from mose.bash_policy import (
+    backend_redirect_message,
+    bash_rejection_message,
+    is_backend_target,
+    is_bash_allowlisted,
+    is_dangerous_command,
+)
 from mose.mcp_write_policy import classify_mcp_tool
 from mose.observe import get_logger, log_event
 from mose.tool_output import LLMExtractor, process_large_output
@@ -157,8 +163,9 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "bash",
             "description": (
-                "Execute a read-only shell command (allowlisted: status, logs, docker ps/logs, curl, ls, cat, etc.). "
-                "For anything that changes state, use sre_execute instead."
+                "Execute a read-only shell command on THIS host (status, logs, docker ps/logs, ls, cat, grep, find, etc.). "
+                "DOES NOT support curl/wget — use ``web_fetch`` for external URLs and ``mcp-portal__portal_codemode_execute`` "
+                "for backend systems (Plex / Sonarr / Radarr / paper_db). For state-changing local commands, use ``sre_execute``."
             ),
             "parameters": {
                 "type": "object",
@@ -476,7 +483,14 @@ def _truncate(text: str, limit: int) -> str:
 
 
 async def _run_shell(command: str, timeout: int, cwd: str | None, *, require_allowlist: bool) -> str:
-    """Run via terminal backend; bash requires allowlist, sre_execute allows any non-dangerous command."""
+    """Run via terminal backend; bash requires allowlist, sre_execute allows any non-dangerous command.
+
+    Backend systems (Plex / Sonarr / Radarr / paper_db / MCP sidecars) are always rejected here
+    so the LLM is forced through the Code Mode portal where credentials and approval policy live.
+    """
+    if is_backend_target(command):
+        log_event(logger, "shell_backend_redirect", command=command[:200])
+        return backend_redirect_message(command)
     if require_allowlist and not is_bash_allowlisted(command):
         return bash_rejection_message(command)
     if not require_allowlist and is_dangerous_command(command):

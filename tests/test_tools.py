@@ -11,7 +11,13 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from mose.config import TerminalConfig
-from mose.bash_policy import is_bash_allowlisted, is_dangerous_command
+from mose.bash_policy import (
+    backend_redirect_message,
+    bash_rejection_message,
+    is_backend_target,
+    is_bash_allowlisted,
+    is_dangerous_command,
+)
 from mose.tools import (
     NATIVE_TOOLS,
     _check_write_allowed,
@@ -134,6 +140,40 @@ class TestBashAllowlist:
     def test_mutations_not_allowlisted(self):
         assert not is_bash_allowlisted("rm -rf ./build")
         assert not is_bash_allowlisted("sudo reboot")
+
+    def test_curl_wget_not_allowlisted(self):
+        assert not is_bash_allowlisted("curl https://example.com")
+        assert not is_bash_allowlisted("wget https://example.com")
+
+    def test_curl_rejection_redirects_to_codemode(self):
+        msg = bash_rejection_message("curl http://localhost:8989/api/v3/queue")
+        assert "web_fetch" in msg
+        assert "portal_codemode_execute" in msg
+
+
+class TestBackendTargetBlock:
+    def test_curl_against_backend_ports_blocked(self):
+        assert is_backend_target('curl -H "X-Plex-Token: $PLEX_TOKEN" http://localhost:32400/status/sessions')
+        assert is_backend_target('curl -H "X-Api-Key: $SONARR_API_KEY" http://localhost:8989/api/v3/queue')
+        assert is_backend_target('wget http://radarr:7878/api/v3/movie')
+
+    def test_arr_api_path_blocked_even_without_known_port(self):
+        assert is_backend_target('curl http://internal-host/api/v3/queue')
+
+    def test_docker_exec_into_mcp_sidecars_blocked(self):
+        assert is_backend_target("docker exec -i mose-plex-ops-admin /usr/local/bin/mcp-entrypoint")
+        assert is_backend_target("docker exec mose-mcp-portal sh")
+
+    def test_benign_commands_allowed(self):
+        assert not is_backend_target("ls /app")
+        assert not is_backend_target("docker ps --filter name=plex")
+        assert not is_backend_target("curl http://localhost:8001/v1/models")  # vLLM healthcheck
+
+    def test_redirect_message_lists_known_servers(self):
+        msg = backend_redirect_message("curl http://localhost:8989/api/v3/queue")
+        assert "portal_codemode_search" in msg
+        assert "portal_codemode_execute" in msg
+        assert "snake_case" in msg
 
 
 class TestSreExecute:

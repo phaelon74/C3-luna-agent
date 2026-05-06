@@ -70,8 +70,56 @@ _BASH_ALLOWLIST: list[re.Pattern[str]] = [
         r"^python3?(\.\d+)?\s+[\w\./\\-]+\.py\b",
         r"^which\s",
         r"^type\s",
+        # NOTE: curl / wget intentionally NOT in this list. Use ``web_fetch`` for
+        # external URLs and the MCP portal (``mcp-portal__portal_codemode_execute``)
+        # for backend systems (Plex / Sonarr / Radarr / paper_db). If you genuinely
+        # need to curl a local service (e.g. vLLM healthcheck), use ``sre_execute``
+        # — it still enforces the backend-target block.
     ]
 ]
+
+
+# Backend systems must be reached via the MCP portal, never via shell. The shell
+# does not have PLEX_TOKEN / *_API_KEY / etc., and direct shell access bypasses
+# the approval policy. Pattern matches anything that looks like a curl/wget/docker
+# attempt against Plex, Sonarr, Radarr, paper_db, or our MCP sidecar containers.
+_BACKEND_TARGET_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(p, re.IGNORECASE)
+    for p in [
+        # curl / wget against well-known backend ports (Plex 32400, Sonarr 8989, Radarr 7878)
+        r"\b(curl|wget|http|httpie)\b[^\n]*?:32400(\b|/)",
+        r"\b(curl|wget|http|httpie)\b[^\n]*?:8989(\b|/)",
+        r"\b(curl|wget|http|httpie)\b[^\n]*?:7878(\b|/)",
+        # Anything referencing the backend env vars (only the MCP sidecars have them)
+        r"\$\{?(PLEX_URL|PLEX_TOKEN|SONARR_URL|SONARR_API_KEY|RADARR_URL|RADARR_API_KEY|TRAKT_CLIENT_ID|TRAKT_CLIENT_SECRET)\b",
+        # docker exec into MCP sidecars or the portal
+        r"\bdocker\s+exec\b[^\n]*?\bmose-(plex-|sonarr-|radarr-|mcp-portal\b|mcp-codemode-)",
+        # /api/v3 paths are *arr APIs
+        r"\b(curl|wget|http|httpie)\b[^\n]*?/api/v3/",
+        # Plex-specific request headers in shell
+        r"X-Plex-Token",
+    ]
+]
+
+
+def is_backend_target(command: str) -> bool:
+    """True if the shell command is trying to reach Plex / Sonarr / Radarr / MCP sidecars directly."""
+    for pat in _BACKEND_TARGET_PATTERNS:
+        if pat.search(command):
+            return True
+    return False
+
+
+def backend_redirect_message(command: str) -> str:
+    """User-facing hint when the agent tries to shell out to a backend system."""
+    return (
+        "Blocked: this command targets a backend system (Plex / Sonarr / Radarr / paper_db / MCP sidecar) "
+        "and the shell has none of the credentials. Use Code Mode instead:\n"
+        "  1) mcp-portal__portal_codemode_search { query: \"<what you want>\" }\n"
+        "  2) mcp-portal__portal_codemode_execute { code: \"const r = await mcp.<server>.<tool>({...}); console.log(JSON.stringify(r));\" }\n"
+        "Server keys are snake_case (e.g. mcp.plex_ops_admin, mcp.sonarr_diagnostics, mcp.radarr_diagnostics, mcp.paper_db).\n"
+        f"Blocked command: {command!r}"
+    )
 
 
 def is_dangerous_command(command: str) -> bool:
@@ -97,9 +145,17 @@ def is_bash_allowlisted(command: str) -> bool:
 
 def bash_rejection_message(command: str) -> str:
     """User-facing hint when bash is not allowlisted."""
-    return (
-        "This command is not allowed via `bash` (read-only allowlist). "
-        "For state-changing or broader commands, use `sre_execute` with a clear reason and target_system — "
-        "it will prompt for human approval before running.\n"
-        f"Blocked command: {command!r}"
-    )
+    head = command.strip().split(None, 1)[0] if command.strip() else ""
+    if head in {"curl", "wget"}:
+        hint = (
+            "`bash` does not allow curl/wget. Use ``web_fetch`` for external URLs, "
+            "or ``mcp-portal__portal_codemode_execute`` to call backend systems "
+            "(Plex / Sonarr / Radarr / paper_db). If this really is a local-host "
+            "diagnostic (e.g. vLLM healthcheck), use ``sre_execute`` instead."
+        )
+    else:
+        hint = (
+            "For state-changing or broader commands, use ``sre_execute`` with a clear "
+            "reason and target_system — it will prompt for human approval before running."
+        )
+    return f"This command is not allowed via `bash` (read-only allowlist).\n{hint}\nBlocked command: {command!r}"
