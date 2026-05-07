@@ -31,11 +31,10 @@ from mose.tools import (
     init_skills_dir,
     init_terminal,
     init_tool_registry,
-    init_tracker_alert_callback,
     init_tracker_propose_callback,
     init_workspace,
 )
-from mose.trackers import default_plex_codemode_collector
+from mose.trackers import default_plex_codemode_collector, init_tracker_alert_callback
 from mose.tracker_decision import handle_tracker_decision, init_tracker_decision_runtime
 
 
