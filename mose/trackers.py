@@ -185,10 +185,14 @@ class TrackerScheduler:
             raise
 
         metrics = data.get("metrics") or {}
-        snapshot = data.get("snapshot") or {}
+        snapshot = data.get("snapshot")
+        if snapshot is None:
+            snapshot = {}
         if not isinstance(metrics, dict):
             metrics = {}
-        if not isinstance(snapshot, dict):
+        # snapshot may legitimately be a list (e.g. per-session rows) or a dict.
+        # Anything else (str/number/bool) is dropped to {} so storage stays sane.
+        if not isinstance(snapshot, (dict, list)):
             snapshot = {}
 
         now = time.time()
@@ -326,7 +330,7 @@ class TrackerScheduler:
         tr: TrackerRow,
         day_bucket: str,
         metrics: dict[str, float],
-        snapshot: dict[str, Any],
+        snapshot: dict[str, Any] | list[Any],
         rollup_updates: list[tuple[str, float | None, float]],
     ) -> list[FiredAlert]:
         out: list[FiredAlert] = []
@@ -364,7 +368,10 @@ class TrackerScheduler:
                 if self.memory.tracker_alert_exists_for_day(tr.id, rid, day_bucket):
                     continue
                 snap_keys = rule.get("include_snapshot") or []
-                snap = {k: snapshot.get(k) for k in snap_keys if isinstance(k, str)}
+                if isinstance(snapshot, dict):
+                    snap = {k: snapshot.get(k) for k in snap_keys if isinstance(k, str)}
+                else:
+                    snap = snapshot
                 out.append(
                     FiredAlert(
                         rule_id=rid,
