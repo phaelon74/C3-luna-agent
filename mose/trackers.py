@@ -264,6 +264,27 @@ class TrackerScheduler:
             text, is_err = await self._execute_codemode(tr.collector_ref, timeout)
             if is_err:
                 raise RuntimeError(f"codemode MCP error: {text[:500]}")
+            # portal_codemode_execute returns a JSON wrapper:
+            # {stdout, stderr, return_value, duration_ms, errors[]}.
+            # The collector's JSON sits inside ``stdout``.
+            try:
+                wrapper = json.loads(text)
+            except json.JSONDecodeError:
+                wrapper = None
+            if isinstance(wrapper, dict) and (
+                "stdout" in wrapper or "errors" in wrapper or "duration_ms" in wrapper
+            ):
+                errs = wrapper.get("errors") or []
+                if errs:
+                    first = errs[0] if isinstance(errs, list) and errs else {}
+                    msg = (first.get("message") if isinstance(first, dict) else None) or str(first)
+                    raise RuntimeError(f"codemode error: {str(msg)[:500]}")
+                stdout = wrapper.get("stdout") or ""
+                if not stdout.strip():
+                    rv = wrapper.get("return_value")
+                    if rv is not None:
+                        stdout = json.dumps(rv) if not isinstance(rv, str) else rv
+                return stdout
             return text
 
         if kind == "bash":
