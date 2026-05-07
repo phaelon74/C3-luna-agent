@@ -14,10 +14,13 @@ from mose.llm import LLMClient
 from mose.memory import MemoryManager
 from mose.mcp_manager import MCPManager
 from mose.observe import get_logger, log_event, log_duration
+from mose.tracker_decision import format_tracker_recovery_message, init_tracker_decision_runtime
+from mose.trackers import TrackerScheduler
 from mose.tools import (
     NATIVE_TOOLS,
     call_native_tool,
     execute_mcp_tool,
+    init_tracker_tool_context,
     is_native_tool,
     verify_tool_result,
 )
@@ -181,7 +184,7 @@ previously learned facts. Not all retrieved memories will be relevant — use ju
 
 {memory_section}
 {summary_section}
-
+{trackers_section}
 Current time: {current_time}
 Workspace: {workspace}"""
 
@@ -242,6 +245,37 @@ def _load_skills(skills_dir: Path, mode: str = "full") -> str:
     return "\n\n---\n\n".join(parts)
 
 
+def _format_active_trackers_block(memory: MemoryManager, trackers_cfg: Any) -> str:
+    """Compact list of enabled trackers for the system prompt (size-capped)."""
+    if not getattr(trackers_cfg, "enabled", True):
+        return ""
+    rows = memory.list_trackers(enabled_only=True)
+    if not rows:
+        return ""
+    from datetime import datetime, timezone
+
+    max_lines = max(1, int(getattr(trackers_cfg, "active_trackers_max_lines", 12)))
+    max_chars = max(100, int(getattr(trackers_cfg, "active_trackers_prompt_chars", 500)))
+    lines: list[str] = ["## Active Trackers (standing duties)"]
+    for t in rows[:max_lines]:
+        lr = ""
+        if t.last_run_at:
+            try:
+                lr = datetime.fromtimestamp(t.last_run_at, tz=timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+            except (OSError, OverflowError, ValueError):
+                lr = "?"
+        st = (t.last_status or "unknown")[:40]
+        sched = f"{t.schedule_seconds}s"
+        line = f"- {t.slug}: {t.description[:80]} (every {sched}, last {lr}, {st})"
+        lines.append(line)
+    if len(rows) > max_lines:
+        lines.append(f"- … and {len(rows) - max_lines} more")
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[: max_chars - 3] + "..."
+    return text
+
+
 def _build_system_prompt(
     memories: list,
     summary: str | None,
@@ -249,6 +283,7 @@ def _build_system_prompt(
     workspace: str = "",
     skills_path: str = "",
     learning: LearningConfig | None = None,
+    trackers_section: str = "",
 ) -> str:
     memory_section = ""
     if memories:
@@ -273,6 +308,7 @@ def _build_system_prompt(
     return SYSTEM_PROMPT_TEMPLATE.format(
         memory_section=memory_section,
         summary_section=summary_section,
+        trackers_section=trackers_section,
         skills_section=skills_section,
         current_time=current_time,
         workspace=workspace,
@@ -308,6 +344,18 @@ class Agent:
         self._review_task: asyncio.Task[Any] | None = None
         # Per-session guard: same MCP tool+args + SDK isError twice → skip further calls (no approval spam).
         self._mcp_repeat_guard: dict[str, dict[str, Any]] = {}
+        self._tracker_scheduler: TrackerScheduler | None = None
+        self._tracker_compact_task: asyncio.Task[Any] | None = None
+        self._tracker_compact_runs: int = 0
+        init_tracker_tool_context(
+            memory=self.memory,
+            config=self.config,
+            get_scheduler=self._get_tracker_scheduler,
+        )
+        init_tracker_decision_runtime(
+            memory=self.memory,
+            get_scheduler=self._get_tracker_scheduler,
+        )
 
     def _build_llm_tools(self, session_id: str) -> list[dict[str, Any]]:
         """Native tools plus MCP tools from connected servers (local list; never mutates ``NATIVE_TOOLS``)."""
@@ -354,11 +402,17 @@ class Agent:
         # 3. Build prompt
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()
+        trackers_section = ""
+        if self.config.trackers.enabled:
+            tb = _format_active_trackers_block(self.memory, self.config.trackers)
+            if tb:
+                trackers_section = tb + "\n\n"
         system = _build_system_prompt(
             memories, summary, now,
             self.config.agent.workspace,
             self.config.agent.skills_path,
             learning=self.config.learning,
+            trackers_section=trackers_section,
         )
         recent = self.memory.get_recent_messages(
             session_id, limit=self.config.agent.recent_messages_limit
@@ -638,3 +692,103 @@ class Agent:
         except (asyncio.CancelledError, Exception):
             pass
         self._review_task = None
+
+    # ---------------------------------------------------------- trackers
+
+    def _get_tracker_scheduler(self) -> TrackerScheduler | None:
+        return self._tracker_scheduler
+
+    def start_trackers_loop(self) -> None:
+        """Spawn tracker scheduler (reconcile + per-tracker loops)."""
+        if not self.config.trackers.enabled:
+            return
+        if self._tracker_scheduler is not None:
+            return
+
+        async def _exec_codemode(code: str, timeout: int) -> tuple[str, bool]:
+            return await execute_mcp_tool(
+                "mcp-portal__portal_codemode_execute",
+                {"code": code, "timeout_seconds": min(120, max(5, int(timeout)))},
+            )
+
+        self._tracker_scheduler = TrackerScheduler(
+            self.memory,
+            self.config.trackers,
+            execute_codemode=_exec_codemode,
+            execute_bash=None,
+        )
+
+        async def _boot() -> None:
+            if self._tracker_scheduler is not None:
+                await self._tracker_scheduler.start()
+
+        asyncio.create_task(_boot(), name="tracker-scheduler-boot")
+        log_event(logger, "trackers_loop_scheduled")
+
+    async def stop_trackers_loop(self) -> None:
+        if self._tracker_scheduler is None:
+            return
+        await self._tracker_scheduler.stop()
+        self._tracker_scheduler = None
+
+    def start_tracker_compaction_loop(self) -> None:
+        """Periodic DB compaction for tracker samples/rollups."""
+        if not self.config.trackers.enabled:
+            return
+        if self._tracker_compact_task is not None and not self._tracker_compact_task.done():
+            return
+        delay = max(0, int(self.config.trackers.compaction_startup_delay_seconds))
+        interval = max(3600, int(self.config.trackers.compaction_interval_hours) * 3600)
+
+        async def _loop() -> None:
+            try:
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                while True:
+                    try:
+                        self._tracker_compact_runs += 1
+                        vacuum = self._tracker_compact_runs % 7 == 0
+                        self.memory.compact_tracker_storage(
+                            sample_retention_days=self.config.trackers.sample_retention_days,
+                            rollup_retention_days=self.config.trackers.rollup_retention_days,
+                            vacuum=vacuum,
+                        )
+                        log_event(
+                            logger,
+                            "tracker_compaction_done",
+                            runs=self._tracker_compact_runs,
+                            vacuum=vacuum,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception("tracker compaction failed")
+                    await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                log_event(logger, "tracker_compaction_loop_cancelled")
+                raise
+
+        self._tracker_compact_task = asyncio.create_task(_loop(), name="tracker-compaction-loop")
+        log_event(logger, "tracker_compaction_loop_started", interval_hours=self.config.trackers.compaction_interval_hours)
+
+    async def stop_tracker_compaction_loop(self) -> None:
+        if self._tracker_compact_task is None:
+            return
+        self._tracker_compact_task.cancel()
+        try:
+            await self._tracker_compact_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        self._tracker_compact_task = None
+
+    def tracker_recovery_digest(self, *, recipient: str | None = None) -> str:
+        """Text block for startup recovery (CLI/Signal)."""
+        return format_tracker_recovery_message(self.memory, recipient=recipient)
+
+    async def run_tracker_compaction_once(self, *, vacuum: bool = False) -> dict[str, int]:
+        """One-shot compaction (CLI / operator)."""
+        return self.memory.compact_tracker_storage(
+            sample_retention_days=self.config.trackers.sample_retention_days,
+            rollup_retention_days=self.config.trackers.rollup_retention_days,
+            vacuum=vacuum,
+        )

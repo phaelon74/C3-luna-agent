@@ -206,6 +206,42 @@ async def _signal_skill_review_notify(report_path: str, summary: str) -> None:
     )
 
 
+async def _signal_tracker_propose_callback(slug: str, description: str, expires_at: float) -> None:
+    """Fire-and-forget Signal notification for tracker proposal / deletion proposal."""
+    bot = _active_bot
+    if bot is None:
+        return
+    admin_gid = (bot.config.admin_group_id or "").strip()
+    if not admin_gid:
+        return
+    prompt = (
+        "Tracker approval needed\n\n"
+        f"Slug: {slug}\n"
+        f"Summary: {description}\n"
+        f"Expires: {_format_ts(expires_at)} (UTC)\n\n"
+        f"Reply 'approve {slug}' or 'reject {slug}'."
+    )
+    try:
+        await bot._send_message(admin_gid, prompt)
+    except Exception:
+        logger.exception("signal_tracker_propose_send_failed", extra={"slug": slug})
+
+
+async def _signal_tracker_alert(tracker: Any, message: str) -> None:
+    """Notify admin group about a tracker alert or auto-disable."""
+    bot = _active_bot
+    if bot is None:
+        return
+    admin_gid = (bot.config.admin_group_id or "").strip()
+    if not admin_gid:
+        return
+    header = getattr(tracker, "slug", "tracker")
+    try:
+        await bot._send_message(admin_gid, f"[tracker:{header}]\n\n{message}")
+    except Exception:
+        logger.exception("signal_tracker_alert_failed", extra={"slug": header})
+
+
 _APPROVE_VERBS = {"approve", "yes", "y"}
 _REJECT_VERBS = {"reject", "no", "n", "deny"}
 _CANCEL_VERBS = {"stop", "cancel", "abort", "halt"}
@@ -298,19 +334,41 @@ async def _handle_skill_approval_reply(bot: "MoseSignalBot", group_id: str, text
     if slug is None:
         if memory is None:
             return False
-        pending = memory.list_pending_approvals(
-            kind="skill_proposal", recipient=admin_gid,
-        )
+        pending = memory.list_pending_approvals(recipient=admin_gid)
         if len(pending) != 1:
             await bot._send_message(
                 admin_gid,
-                f"{len(pending)} skill proposals pending; please include the slug "
+                f"{len(pending)} items pending approval (skills + trackers); please include the slug "
                 f"(e.g. 'approve my-skill').",
             )
             return True
         slug = pending[0].slug
 
+    if memory is None:
+        return False
+    row = memory.get_pending_approval(slug)
+    if row is None:
+        await bot._send_message(
+            admin_gid,
+            f"No pending proposal found for '{slug}' (already decided or expired).",
+        )
+        return True
+
     approved = action == "approve"
+    if row.kind in ("tracker_proposal", "tracker_deletion"):
+        from mose.tracker_decision import handle_tracker_decision
+
+        applied = await handle_tracker_decision(slug, approved=approved)
+        if applied:
+            verb = "approved" if approved else "rejected"
+            await bot._send_message(admin_gid, f"Tracker request '{slug}' {verb}.")
+        else:
+            await bot._send_message(
+                admin_gid,
+                f"No change for '{slug}' (duplicate tracker, wrong state, or unknown).",
+            )
+        return True
+
     from mose.learning import handle_skill_decision
     applied = await handle_skill_decision(slug, approved=approved)
     if applied:

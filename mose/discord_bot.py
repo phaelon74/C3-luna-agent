@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 from contextvars import ContextVar
+from typing import Any
 
 import discord
 
@@ -23,6 +24,16 @@ _approval_ctx: ContextVar[dict] = ContextVar("approval_ctx", default={})
 # the same pattern. aiohttp runs its handler in a separate task so ContextVar
 # isn't visible. Single-user homelab assumption.
 _last_approval_ctx: dict = {}
+
+
+async def _discord_tracker_alert(tracker: Any, message: str) -> None:
+    """Discord has no admin DM channel wired for trackers — log only."""
+    log_event(
+        logger,
+        "discord_tracker_alert",
+        slug=getattr(tracker, "slug", ""),
+        message_len=len(message),
+    )
 
 
 def set_approval_context(channel, author, bot) -> None:

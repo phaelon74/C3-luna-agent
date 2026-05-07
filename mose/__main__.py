@@ -26,7 +26,17 @@ from mose.learning import (
     init_skill_reminder,
     init_skill_review,
 )
-from mose.tools import init_workspace, init_tool_registry, init_approval, init_terminal, init_skills_dir
+from mose.tools import (
+    init_approval,
+    init_skills_dir,
+    init_terminal,
+    init_tool_registry,
+    init_tracker_alert_callback,
+    init_tracker_propose_callback,
+    init_workspace,
+)
+from mose.trackers import default_plex_codemode_collector
+from mose.tracker_decision import handle_tracker_decision, init_tracker_decision_runtime
 
 
 async def _maybe_start_portal_approval_bridge(config) -> Any:
@@ -36,6 +46,23 @@ async def _maybe_start_portal_approval_bridge(config) -> Any:
     from mose.approval_bridge import start_approval_bridge
 
     return await start_approval_bridge(config.portal)
+
+
+async def _cli_tracker_propose_callback(slug: str, description: str, expires_at: float) -> None:
+    from datetime import datetime, timezone
+
+    exp = datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(timespec="minutes")
+    print(
+        f"\n[tracker proposal] {slug}\n"
+        f"  {description}\n"
+        f"  Expires: {exp} UTC\n"
+        f"  Decide: python -m mose --decide {slug} y|n\n"
+    )
+
+
+async def _cli_tracker_alert(tracker: Any, message: str) -> None:
+    slug = getattr(tracker, "slug", "tracker")
+    print(f"\n[tracker alert:{slug}]\n{message}\n")
 
 
 async def _cli_skill_propose_callback(
@@ -209,6 +236,69 @@ async def _run_cli(agent: Agent) -> None:
             print(f"\nError: {e}\n")
 
 
+def _run_list_trackers_cli(config) -> int:
+    memory = MemoryManager(config.memory)
+    rows = memory.list_trackers(enabled_only=False)
+    memory.close()
+    out = [
+        {
+            "slug": t.slug,
+            "enabled": t.enabled,
+            "schedule_seconds": t.schedule_seconds,
+            "last_status": t.last_status,
+        }
+        for t in rows
+    ]
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+def _run_seed_tracker_cli(config, name: str) -> int:
+    memory = MemoryManager(config.memory)
+    try:
+        if memory.get_tracker(name):
+            print(f"tracker '{name}' already exists")
+            return 1
+        if name == "plex_streams":
+            memory.create_tracker(
+                slug="plex_streams",
+                description="Plex active sessions / transcodes (seeded)",
+                collector_kind="codemode",
+                collector_ref=default_plex_codemode_collector(),
+                schedule_seconds=300,
+                aggregations=["streams", "transcodes"],
+                alert_rules=[
+                    {
+                        "id": "streams_record",
+                        "type": "new_daily_high",
+                        "metric": "streams_daily_max",
+                        "lookback_days": 30,
+                    }
+                ],
+                recipients=[config.trackers.default_recipient],
+            )
+            print(f"Seeded tracker '{name}' (approve not required — direct insert).")
+            return 0
+        print(f"Unknown seed name '{name}'. Try: plex_streams")
+        return 2
+    finally:
+        memory.close()
+
+
+def _run_tracker_compact_cli(config, *, vacuum: bool) -> int:
+    memory = MemoryManager(config.memory)
+    try:
+        stats = memory.compact_tracker_storage(
+            sample_retention_days=config.trackers.sample_retention_days,
+            rollup_retention_days=config.trackers.rollup_retention_days,
+            vacuum=vacuum,
+        )
+        print(json.dumps(stats, indent=2))
+        return 0
+    finally:
+        memory.close()
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="mose", description="Mose SRE/DevOps agent")
     parser.add_argument(
@@ -233,6 +323,31 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--sweep-approvals",
         action="store_true",
         help="Run the pending-approvals sweep (expire stale, remind admin) and exit.",
+    )
+    parser.add_argument(
+        "--tracker-compact",
+        action="store_true",
+        help="Run one-shot tracker sample/rollup retention cleanup and exit.",
+    )
+    parser.add_argument(
+        "--tracker-compact-vacuum",
+        action="store_true",
+        help="With --tracker-compact: also run VACUUM (can be slow).",
+    )
+    parser.add_argument(
+        "--list-trackers",
+        action="store_true",
+        help="Print configured trackers as JSON and exit.",
+    )
+    parser.add_argument(
+        "--seed-tracker",
+        metavar="NAME",
+        help="Insert a built-in tracker row (e.g. plex_streams) and exit.",
+    )
+    parser.add_argument(
+        "--tracker-run-now",
+        metavar="SLUG",
+        help="Run one tracker tick (requires a running agent process with MCP; prefer REPL).",
     )
     return parser.parse_args(argv)
 
@@ -271,6 +386,14 @@ async def _run_decide_once(config, slug: str, decision: str) -> int:
         applied = learner.cancel_approved_build(slug, memory)
         memory.close()
         print(f"{slug}: {'build cancelled' if applied else 'noop (not approved-but-unbuilt)'}")
+        return 0 if applied else 1
+
+    row = memory.get_pending_approval(slug)
+    if row is not None and row.kind in ("tracker_proposal", "tracker_deletion"):
+        init_tracker_decision_runtime(memory=memory, get_scheduler=lambda: None)
+        applied = await handle_tracker_decision(slug, approved=(action == "approve"))
+        memory.close()
+        print(f"{slug}: {'applied' if applied else 'noop (already decided, duplicate, or unknown)'}")
         return 0 if applied else 1
 
     init_skill_decision_runtime(learner=learner, memory=memory, llm=llm)
@@ -365,6 +488,25 @@ async def main() -> None:
         code = await _run_sweep_once(config)
         sys.exit(code)
 
+    if args.tracker_compact:
+        log_event(logger, "tracker_compact_cli", vacuum=args.tracker_compact_vacuum)
+        code = _run_tracker_compact_cli(config, vacuum=args.tracker_compact_vacuum)
+        sys.exit(code)
+
+    if args.list_trackers:
+        sys.exit(_run_list_trackers_cli(config))
+
+    if args.seed_tracker:
+        log_event(logger, "seed_tracker_cli", name=args.seed_tracker)
+        sys.exit(_run_seed_tracker_cli(config, args.seed_tracker.strip()))
+
+    if args.tracker_run_now:
+        print(
+            "Use tracker_run_now from a live agent session (LLM tool). "
+            "One-shot CLI tick is not wired without a long-running scheduler."
+        )
+        sys.exit(2)
+
     log_event(logger, "startup", llm_endpoint=config.llm.endpoint)
 
     # Initialize workspace sandbox
@@ -391,21 +533,33 @@ async def main() -> None:
                 _signal_skill_propose_callback,
                 _signal_skill_recovery_notice,
                 _signal_skill_review_notify,
+                _signal_tracker_alert,
+                _signal_tracker_propose_callback,
             )
             init_skill_promotion(_signal_skill_propose_callback)
             init_skill_reminder(None)  # superseded by the consolidated recovery notice
             init_skill_recovery_notice(_signal_skill_recovery_notice)
             init_skill_review(_signal_skill_review_notify)
+            init_tracker_propose_callback(_signal_tracker_propose_callback)
+            init_tracker_alert_callback(_signal_tracker_alert)
             init_approval(_signal_approval_callback)
             approval_bridge_handle = await _maybe_start_portal_approval_bridge(config)
             agent = Agent(config, llm, memory, mcp)
             init_skill_decision_runtime(learner=agent._skill_learner, memory=memory, llm=llm)
             agent.start_skill_review_loop()
+            agent.start_trackers_loop()
+            agent.start_tracker_compaction_loop()
             bot = MoseSignalBot(agent, config.signal)
-            # Defer restart recovery until Signal is connected so the consolidated
-            # notice can actually reach the admin. Expiration + rejection file
-            # moves still happen deterministically inside run_startup_recovery.
-            bot.on_ready = agent.recover_pending_approvals
+
+            async def _signal_startup_recovery() -> None:
+                await agent.recover_pending_approvals()
+                extra = agent.tracker_recovery_digest(recipient=config.signal.admin_group_id)
+                if extra.strip():
+                    adm = (config.signal.admin_group_id or "").strip()
+                    if adm:
+                        await bot._send_message(adm, extra)
+
+            bot.on_ready = _signal_startup_recovery
             log_event(logger, "starting_signal_bot")
             try:
                 await bot.start()
@@ -413,15 +567,23 @@ async def main() -> None:
                 pass
             finally:
                 await agent.stop_skill_review_loop()
+                await agent.stop_tracker_compaction_loop()
+                await agent.stop_trackers_loop()
                 await bot.close()
         elif config.discord.token:
-            from mose.discord_bot import MoseDiscordBot, _discord_approval_callback
+            from mose.discord_bot import (
+                MoseDiscordBot,
+                _discord_approval_callback,
+                _discord_tracker_alert,
+            )
             # Discord skill-proposal UX is not wired; no callback means proposals
             # are rejected immediately and never built (required by policy).
             init_skill_promotion(None)
             init_skill_reminder(None)
             init_skill_recovery_notice(None)
             init_skill_review(None)
+            init_tracker_propose_callback(None)
+            init_tracker_alert_callback(_discord_tracker_alert)
             init_approval(_discord_approval_callback)
             approval_bridge_handle = await _maybe_start_portal_approval_bridge(config)
             agent = Agent(config, llm, memory, mcp)
@@ -430,6 +592,8 @@ async def main() -> None:
             # ages out expired rows, but there's no channel to notify.
             await agent.recover_pending_approvals()
             agent.start_skill_review_loop()
+            agent.start_trackers_loop()
+            agent.start_tracker_compaction_loop()
             bot = MoseDiscordBot(agent)
             log_event(logger, "starting_discord_bot")
             try:
@@ -438,12 +602,16 @@ async def main() -> None:
                 pass
             finally:
                 await agent.stop_skill_review_loop()
+                await agent.stop_tracker_compaction_loop()
+                await agent.stop_trackers_loop()
                 await bot.close()
         else:
             init_skill_promotion(_cli_skill_propose_callback)
             init_skill_reminder(None)  # CLI reminds through foreground prompts
             init_skill_recovery_notice(_cli_skill_recovery_notice)
             init_skill_review(_cli_skill_review_notify)
+            init_tracker_propose_callback(_cli_tracker_propose_callback)
+            init_tracker_alert_callback(_cli_tracker_alert)
             init_approval(_cli_approval_callback)
             approval_bridge_handle = await _maybe_start_portal_approval_bridge(config)
             log_event(logger, "cli_mode")
@@ -456,11 +624,18 @@ async def main() -> None:
             agent = Agent(config, llm, memory, mcp, tool_callback=_print_tool_call)
             init_skill_decision_runtime(learner=agent._skill_learner, memory=memory, llm=llm)
             await agent.recover_pending_approvals()
+            extra_cli = agent.tracker_recovery_digest(recipient=None)
+            if extra_cli.strip():
+                print(extra_cli)
             agent.start_skill_review_loop()
+            agent.start_trackers_loop()
+            agent.start_tracker_compaction_loop()
             try:
                 await _run_cli(agent)
             finally:
                 await agent.stop_skill_review_loop()
+                await agent.stop_tracker_compaction_loop()
+                await agent.stop_trackers_loop()
     finally:
         from mose.approval_bridge import stop_approval_bridge
 

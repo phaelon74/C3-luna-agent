@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -78,6 +79,12 @@ _approval_callback: "Callable[[str, str, str], Any] | None" = None
 # Skills root (for load_skill) — set by init_skills() at startup
 _skills_dir: Path | None = None
 
+# Trackers — set by init_tracker_tool_context() at startup
+_tracker_memory: "Any | None" = None
+_tracker_config: "Any | None" = None
+_get_tracker_scheduler: Callable[[], Any] | None = None
+_tracker_propose_callback: Callable[..., Any] | None = None
+
 
 def init_tool_registry(mcp: "MCPManager") -> None:
     """Register the MCP manager so meta-tools can discover and call MCP tools."""
@@ -117,6 +124,23 @@ def init_skills_dir(skills_path: str) -> None:
     global _skills_dir
     _skills_dir = Path(skills_path).resolve()
     log_event(logger, "skills_dir_initialized", path=str(_skills_dir))
+
+
+def init_tracker_tool_context(
+    *,
+    memory: Any,
+    config: Any,
+    get_scheduler: Callable[[], Any | None],
+) -> None:
+    global _tracker_memory, _tracker_config, _get_tracker_scheduler
+    _tracker_memory = memory
+    _tracker_config = config
+    _get_tracker_scheduler = get_scheduler
+
+
+def init_tracker_propose_callback(callback: Callable[..., Any] | None) -> None:
+    global _tracker_propose_callback
+    _tracker_propose_callback = callback
 
 
 def init_terminal(cfg: "TerminalConfig", workspace: str) -> None:
@@ -403,6 +427,145 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["task"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tracker_propose",
+            "description": (
+                "Propose a new scheduled data tracker (human must approve). "
+                "Use collector_kind 'codemode' with TypeScript for Plex/Sonarr/Radarr/NZBGet via "
+                "mcp-portal (same as Code Mode). Collector must console.log JSON: "
+                '{\"metrics\":{...},\"snapshot\":{...}}. '
+                "Does not start collection until approved."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "Unique kebab-case id (e.g. plex-streams)."},
+                    "description": {"type": "string", "description": "What this tracker measures."},
+                    "collector_kind": {
+                        "type": "string",
+                        "enum": ["codemode", "bash"],
+                        "description": "Prefer codemode for backend systems.",
+                    },
+                    "collector_codemode": {
+                        "type": "string",
+                        "description": "TypeScript body for portal_codemode_execute when kind is codemode.",
+                    },
+                    "schedule_seconds": {
+                        "type": "integer",
+                        "description": "Interval between samples (e.g. 300 for 5 minutes).",
+                    },
+                    "aggregations": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Metric keys to rollup daily (default: all numeric metrics).",
+                    },
+                    "alert_rules": {
+                        "type": "array",
+                        "description": (
+                            "Rules as objects, e.g. "
+                            "{\"id\":\"rec\",\"type\":\"new_daily_high\",\"metric\":\"streams_daily_max\","
+                            "\"lookback_days\":30} or threshold_above / threshold_below / delta_pct."
+                        ),
+                    },
+                    "recipients": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "e.g. signal:admin",
+                    },
+                    "created_by_session": {
+                        "type": "string",
+                        "description": "Optional session id for audit.",
+                    },
+                },
+                "required": ["slug", "description", "collector_kind", "collector_codemode", "schedule_seconds"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tracker_delete_propose",
+            "description": "Propose deleting an existing tracker (requires human approval).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_slug": {"type": "string", "description": "Tracker slug to remove."},
+                },
+                "required": ["target_slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tracker_list",
+            "description": "List configured trackers as JSON.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "enabled_only": {"type": "boolean", "description": "If true, only enabled trackers."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tracker_query",
+            "description": "Query recent samples and/or rollups for a tracker slug.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string"},
+                    "since": {"type": "number", "description": "Unix epoch (optional)."},
+                    "until": {"type": "number", "description": "Unix epoch (optional)."},
+                    "metric": {"type": "string", "description": "Filter rollups by metric name."},
+                    "since_bucket": {"type": "string", "description": "YYYY-MM-DD inclusive."},
+                    "until_bucket": {"type": "string", "description": "YYYY-MM-DD inclusive."},
+                    "limit": {"type": "integer", "description": "Max samples (default 50)."},
+                },
+                "required": ["slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tracker_pause",
+            "description": "Disable a tracker (stops scheduled collection).",
+            "parameters": {
+                "type": "object",
+                "properties": {"slug": {"type": "string"}},
+                "required": ["slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tracker_resume",
+            "description": "Re-enable a paused tracker.",
+            "parameters": {
+                "type": "object",
+                "properties": {"slug": {"type": "string"}},
+                "required": ["slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tracker_run_now",
+            "description": "Run one collection tick immediately for a tracker.",
+            "parameters": {
+                "type": "object",
+                "properties": {"slug": {"type": "string"}},
+                "required": ["slug"],
             },
         },
     },
@@ -1175,6 +1338,203 @@ async def _tool_code_task(args: dict, context: str = "", llm=None, root=None, **
     return final
 
 
+_VALID_TRACKER_SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+async def _tool_tracker_propose(args: dict, **kwargs) -> str:
+    from mose.tracker_decision import TRACKER_PROPOSAL_KIND
+
+    if _tracker_memory is None or _tracker_config is None:
+        return "Error: tracker subsystem not initialized."
+    slug = str(args.get("slug") or "").strip()
+    if not _VALID_TRACKER_SLUG.match(slug):
+        return "Error: slug must match kebab-case [a-z0-9]+(-[a-z0-9]+)*."
+    desc = str(args.get("description") or "").strip()
+    if not desc:
+        return "Error: description is required."
+    kind = str(args.get("collector_kind") or "codemode").strip().lower()
+    ref = str(args.get("collector_codemode") or args.get("collector_ref") or "").strip()
+    if not ref:
+        return "Error: collector_codemode is required."
+    if kind == "bash":
+        low = ref.lower()
+        if any(x in low for x in ("plex", "32400", "sonarr", "radarr", "nzbget", "paper_db")):
+            return (
+                "Error: do not use bash to reach Plex/Sonarr/Radarr/NZBGet/paper_db — "
+                "use collector_kind 'codemode' and mcp-portal__portal_codemode_execute."
+            )
+    try:
+        schedule_seconds = int(args.get("schedule_seconds") or 300)
+    except (TypeError, ValueError):
+        return "Error: schedule_seconds must be an integer."
+    schedule_seconds = max(5, min(schedule_seconds, 86400))
+    aggs = args.get("aggregations")
+    if aggs is not None and not isinstance(aggs, list):
+        return "Error: aggregations must be a list of strings or omitted."
+    rules = args.get("alert_rules")
+    if rules is not None and not isinstance(rules, list):
+        return "Error: alert_rules must be a list or omitted."
+    recips = args.get("recipients")
+    if recips is not None and not isinstance(recips, list):
+        return "Error: recipients must be a list or omitted."
+    if recips is None:
+        recips = [getattr(_tracker_config.trackers, "default_recipient", "signal:admin")]
+    recipient = str(getattr(_tracker_config.signal, "admin_group_id", "") or "").strip() or "cli"
+    expires_at = time.time() + int(getattr(_tracker_config.signal, "proposal_timeout_seconds", 43200))
+    payload = {
+        "tracker_slug": slug,
+        "description": desc,
+        "collector_kind": kind,
+        "collector_ref": ref,
+        "schedule_seconds": schedule_seconds,
+        "aggregations": aggs or [],
+        "alert_rules": rules or [],
+        "recipients": recips,
+        "created_by_session": args.get("created_by_session"),
+    }
+    _tracker_memory.save_pending_approval(
+        slug=slug,
+        kind=TRACKER_PROPOSAL_KIND,
+        recipient=recipient,
+        proposal_path="",
+        payload=payload,
+        expires_at=expires_at,
+    )
+    if _tracker_propose_callback is not None:
+        try:
+            ret = _tracker_propose_callback(slug, desc, expires_at)
+            if asyncio.iscoroutine(ret):
+                await ret
+        except Exception:
+            logger.exception("tracker_propose_callback failed", extra={"slug": slug})
+    return (
+        f"Tracker proposal '{slug}' recorded (expires soon). "
+        "Awaiting admin approval (Signal/CLI: python -m mose --decide <slug> y|n)."
+    )
+
+
+async def _tool_tracker_delete_propose(args: dict, **kwargs) -> str:
+    from mose.tracker_decision import TRACKER_DELETION_KIND
+
+    if _tracker_memory is None or _tracker_config is None:
+        return "Error: tracker subsystem not initialized."
+    target = str(args.get("target_slug") or "").strip()
+    if not _VALID_TRACKER_SLUG.match(target):
+        return "Error: target_slug must be kebab-case."
+    if _tracker_memory.get_tracker(target) is None:
+        return f"Error: no tracker named '{target}'."
+    pending_slug = f"tracker-del-{target}"
+    if not _VALID_TRACKER_SLUG.match(pending_slug):
+        pending_slug = f"tracker-del-{target}"[:200]
+    recipient = str(getattr(_tracker_config.signal, "admin_group_id", "") or "").strip() or "cli"
+    expires_at = time.time() + int(getattr(_tracker_config.signal, "proposal_timeout_seconds", 43200))
+    _tracker_memory.save_pending_approval(
+        slug=pending_slug,
+        kind=TRACKER_DELETION_KIND,
+        recipient=recipient,
+        proposal_path="",
+        payload={"target_slug": target, "description": f"Delete tracker {target}"},
+        expires_at=expires_at,
+    )
+    if _tracker_propose_callback is not None:
+        try:
+            ret = _tracker_propose_callback(pending_slug, f"Delete tracker {target}", expires_at)
+            if asyncio.iscoroutine(ret):
+                await ret
+        except Exception:
+            logger.exception("tracker_delete_propose_callback failed", extra={"slug": pending_slug})
+    return (
+        f"Deletion proposal '{pending_slug}' recorded. "
+        "Admin must approve: python -m mose --decide <slug> y|n"
+    )
+
+
+async def _tool_tracker_list(args: dict, **kwargs) -> str:
+    if _tracker_memory is None:
+        return "Error: tracker subsystem not initialized."
+    enabled_only = bool(args.get("enabled_only", False))
+    rows = _tracker_memory.list_trackers(enabled_only=enabled_only)
+    out = [
+        {
+            "slug": t.slug,
+            "description": t.description,
+            "enabled": t.enabled,
+            "schedule_seconds": t.schedule_seconds,
+            "last_run_at": t.last_run_at,
+            "last_status": t.last_status,
+            "consecutive_failures": t.consecutive_failures,
+        }
+        for t in rows
+    ]
+    return json.dumps(out, indent=2)
+
+
+async def _tool_tracker_query(args: dict, **kwargs) -> str:
+    if _tracker_memory is None:
+        return "Error: tracker subsystem not initialized."
+    slug = str(args.get("slug") or "").strip()
+    if not slug:
+        return "Error: slug is required."
+    since = args.get("since")
+    until = args.get("until")
+    try:
+        since_f = float(since) if since is not None else None
+        until_f = float(until) if until is not None else None
+    except (TypeError, ValueError):
+        return "Error: since/until must be numbers."
+    limit = int(args.get("limit") or 50)
+    limit = max(1, min(limit, 500))
+    samples = _tracker_memory.query_tracker_samples(slug, since=since_f, until=until_f, limit=limit)
+    metric = args.get("metric")
+    since_b = args.get("since_bucket")
+    until_b = args.get("until_bucket")
+    rollups = _tracker_memory.query_tracker_rollups(
+        slug,
+        metric=str(metric) if metric else None,
+        since_bucket=str(since_b) if since_b else None,
+        until_bucket=str(until_b) if until_b else None,
+    )
+    return json.dumps({"samples": samples, "rollups": rollups}, indent=2, default=str)
+
+
+async def _tool_tracker_pause(args: dict, **kwargs) -> str:
+    if _tracker_memory is None:
+        return "Error: tracker subsystem not initialized."
+    slug = str(args.get("slug") or "").strip()
+    if not slug:
+        return "Error: slug is required."
+    if not _tracker_memory.update_tracker(slug, enabled=False):
+        return f"Error: unknown tracker '{slug}'."
+    sch = _get_tracker_scheduler() if _get_tracker_scheduler else None
+    if sch is not None:
+        await sch.reconcile()
+    return f"Tracker '{slug}' paused."
+
+
+async def _tool_tracker_resume(args: dict, **kwargs) -> str:
+    if _tracker_memory is None:
+        return "Error: tracker subsystem not initialized."
+    slug = str(args.get("slug") or "").strip()
+    if not slug:
+        return "Error: slug is required."
+    if not _tracker_memory.update_tracker(slug, enabled=True, consecutive_failures=0):
+        return f"Error: unknown tracker '{slug}'."
+    sch = _get_tracker_scheduler() if _get_tracker_scheduler else None
+    if sch is not None:
+        await sch.reconcile()
+    return f"Tracker '{slug}' resumed."
+
+
+async def _tool_tracker_run_now(args: dict, **kwargs) -> str:
+    sch = _get_tracker_scheduler() if _get_tracker_scheduler else None
+    if sch is None:
+        return "Error: tracker scheduler not running."
+    slug = str(args.get("slug") or "").strip()
+    if not slug:
+        return "Error: slug is required."
+    return await sch.run_once(slug)
+
+
 # --- Registry ---
 
 _TOOL_REGISTRY: dict[str, Any] = {
@@ -1189,4 +1549,11 @@ _TOOL_REGISTRY: dict[str, Any] = {
     "summarize_paper": _tool_summarize_paper,
     "delegate": _tool_delegate,
     "code_task": _tool_code_task,
+    "tracker_propose": _tool_tracker_propose,
+    "tracker_delete_propose": _tool_tracker_delete_propose,
+    "tracker_list": _tool_tracker_list,
+    "tracker_query": _tool_tracker_query,
+    "tracker_pause": _tool_tracker_pause,
+    "tracker_resume": _tool_tracker_resume,
+    "tracker_run_now": _tool_tracker_run_now,
 }

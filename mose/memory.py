@@ -6,6 +6,7 @@ import json
 import sqlite3
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,53 @@ CREATE INDEX IF NOT EXISTS idx_pending_approvals_recipient ON pending_approvals(
 CREATE INDEX IF NOT EXISTS idx_pending_approvals_expires ON pending_approvals(expires_at);
 """
 
+TRACKERS_SQL = """
+CREATE TABLE IF NOT EXISTS trackers (
+    id INTEGER PRIMARY KEY,
+    slug TEXT UNIQUE NOT NULL,
+    description TEXT NOT NULL,
+    collector_kind TEXT NOT NULL,
+    collector_ref TEXT NOT NULL,
+    schedule_seconds INTEGER NOT NULL,
+    aggregations TEXT,
+    alert_rules TEXT,
+    recipients TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_by_session TEXT,
+    created_at REAL NOT NULL,
+    last_run_at REAL,
+    last_status TEXT,
+    consecutive_failures INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS tracker_samples (
+    id INTEGER PRIMARY KEY,
+    tracker_id INTEGER NOT NULL,
+    ts REAL NOT NULL,
+    payload TEXT NOT NULL,
+    FOREIGN KEY (tracker_id) REFERENCES trackers(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_tracker_samples_tid_ts ON tracker_samples(tracker_id, ts);
+CREATE TABLE IF NOT EXISTS tracker_rollups (
+    tracker_id INTEGER NOT NULL,
+    bucket TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    value REAL NOT NULL,
+    sample_id INTEGER,
+    PRIMARY KEY (tracker_id, bucket, metric),
+    FOREIGN KEY (tracker_id) REFERENCES trackers(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS tracker_alerts (
+    id INTEGER PRIMARY KEY,
+    tracker_id INTEGER NOT NULL,
+    rule_id TEXT NOT NULL,
+    triggered_at REAL NOT NULL,
+    payload TEXT NOT NULL,
+    notified_at REAL,
+    FOREIGN KEY (tracker_id) REFERENCES trackers(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_tracker_alerts_tid_rule ON tracker_alerts(tracker_id, rule_id);
+"""
+
 FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content,
@@ -126,6 +174,25 @@ class PendingApproval:
     decided_at: float | None = None
 
 
+@dataclass
+class TrackerRow:
+    id: int
+    slug: str
+    description: str
+    collector_kind: str
+    collector_ref: str
+    schedule_seconds: int
+    aggregations: list[Any]
+    alert_rules: list[Any]
+    recipients: list[str]
+    enabled: bool
+    created_by_session: str | None
+    created_at: float
+    last_run_at: float | None
+    last_status: str | None
+    consecutive_failures: int
+
+
 class MemoryManager:
     """Persistent memory with hybrid keyword + vector search."""
 
@@ -147,6 +214,7 @@ class MemoryManager:
         self._init_schema()
         self._ensure_skill_usage()
         self._ensure_pending_approvals()
+        self._ensure_trackers()
         log_event(logger, "memory_initialized", db_path=config.db_path)
 
     def _init_schema(self) -> None:
@@ -180,6 +248,14 @@ class MemoryManager:
         ).fetchone()
         if not row:
             self.db.executescript(PENDING_APPROVALS_SQL)
+            self.db.commit()
+
+    def _ensure_trackers(self) -> None:
+        row = self.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='trackers'"
+        ).fetchone()
+        if not row:
+            self.db.executescript(TRACKERS_SQL)
             self.db.commit()
 
     # ---------------------------------------------------------- approvals
@@ -640,6 +716,383 @@ class MemoryManager:
                       facts_extracted=len(data.get("facts", [])))
         except Exception:
             logger.exception("Failed to summarize/extract")
+
+    # --- Trackers (scheduled data collection) ---
+
+    @staticmethod
+    def _parse_json_list(raw: str | None) -> list[Any]:
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, list) else []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    @staticmethod
+    def _parse_json_str_list(raw: str | None) -> list[str]:
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                return [str(x) for x in data]
+            return []
+        except (json.JSONDecodeError, TypeError):
+            return []
+
+    def _row_to_tracker(self, row: tuple[Any, ...] | None) -> TrackerRow | None:
+        if row is None:
+            return None
+        (
+            tid,
+            slug,
+            description,
+            collector_kind,
+            collector_ref,
+            schedule_seconds,
+            aggregations,
+            alert_rules,
+            recipients,
+            enabled,
+            created_by_session,
+            created_at,
+            last_run_at,
+            last_status,
+            consecutive_failures,
+        ) = row
+        return TrackerRow(
+            id=int(tid),
+            slug=str(slug),
+            description=str(description),
+            collector_kind=str(collector_kind),
+            collector_ref=str(collector_ref),
+            schedule_seconds=int(schedule_seconds),
+            aggregations=self._parse_json_list(aggregations),
+            alert_rules=self._parse_json_list(alert_rules),
+            recipients=self._parse_json_str_list(recipients),
+            enabled=bool(enabled),
+            created_by_session=created_by_session,
+            created_at=float(created_at),
+            last_run_at=float(last_run_at) if last_run_at is not None else None,
+            last_status=str(last_status) if last_status is not None else None,
+            consecutive_failures=int(consecutive_failures or 0),
+        )
+
+    def create_tracker(
+        self,
+        *,
+        slug: str,
+        description: str,
+        collector_kind: str,
+        collector_ref: str,
+        schedule_seconds: int,
+        aggregations: list[Any] | None = None,
+        alert_rules: list[Any] | None = None,
+        recipients: list[str] | None = None,
+        created_by_session: str | None = None,
+        enabled: bool = True,
+    ) -> int:
+        now = time.time()
+        agg_json = json.dumps(aggregations or [])
+        rules_json = json.dumps(alert_rules or [])
+        rec_json = json.dumps(recipients or ["signal:admin"])
+        cur = self.db.execute(
+            "INSERT INTO trackers (slug, description, collector_kind, collector_ref, "
+            "schedule_seconds, aggregations, alert_rules, recipients, enabled, "
+            "created_by_session, created_at, last_run_at, last_status, consecutive_failures) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)",
+            (
+                slug,
+                description,
+                collector_kind,
+                collector_ref,
+                schedule_seconds,
+                agg_json,
+                rules_json,
+                rec_json,
+                1 if enabled else 0,
+                created_by_session,
+                now,
+            ),
+        )
+        self.db.commit()
+        log_event(logger, "tracker_created", slug=slug, tracker_id=cur.lastrowid)
+        return int(cur.lastrowid)
+
+    def update_tracker(self, slug: str, **fields: Any) -> bool:
+        if not fields:
+            return False
+        allowed = {
+            "description",
+            "collector_kind",
+            "collector_ref",
+            "schedule_seconds",
+            "aggregations",
+            "alert_rules",
+            "recipients",
+            "enabled",
+            "last_run_at",
+            "last_status",
+            "consecutive_failures",
+        }
+        sets: list[str] = []
+        vals: list[Any] = []
+        for k, v in fields.items():
+            if k not in allowed:
+                continue
+            if k in ("aggregations", "alert_rules"):
+                v = json.dumps(v if v is not None else [])
+            elif k == "recipients":
+                v = json.dumps(v if v is not None else [])
+            elif k == "enabled":
+                v = 1 if v else 0
+            sets.append(f"{k} = ?")
+            vals.append(v)
+        if not sets:
+            return False
+        vals.append(slug)
+        cur = self.db.execute(
+            f"UPDATE trackers SET {', '.join(sets)} WHERE slug = ?",
+            vals,
+        )
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def delete_tracker(self, slug: str) -> bool:
+        cur = self.db.execute("DELETE FROM trackers WHERE slug = ?", (slug,))
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def list_trackers(self, *, enabled_only: bool = False) -> list[TrackerRow]:
+        sql = (
+            "SELECT id, slug, description, collector_kind, collector_ref, schedule_seconds, "
+            "aggregations, alert_rules, recipients, enabled, created_by_session, created_at, "
+            "last_run_at, last_status, consecutive_failures FROM trackers"
+        )
+        if enabled_only:
+            sql += " WHERE enabled = 1"
+        sql += " ORDER BY slug"
+        rows = self.db.execute(sql).fetchall()
+        return [t for t in (self._row_to_tracker(r) for r in rows) if t is not None]
+
+    def list_trackers_degraded(self) -> list[TrackerRow]:
+        rows = self.db.execute(
+            "SELECT id, slug, description, collector_kind, collector_ref, schedule_seconds, "
+            "aggregations, alert_rules, recipients, enabled, created_by_session, created_at, "
+            "last_run_at, last_status, consecutive_failures FROM trackers "
+            "WHERE consecutive_failures > 0 ORDER BY slug"
+        ).fetchall()
+        return [t for t in (self._row_to_tracker(r) for r in rows) if t is not None]
+
+    def get_tracker(self, slug: str) -> TrackerRow | None:
+        row = self.db.execute(
+            "SELECT id, slug, description, collector_kind, collector_ref, schedule_seconds, "
+            "aggregations, alert_rules, recipients, enabled, created_by_session, created_at, "
+            "last_run_at, last_status, consecutive_failures FROM trackers WHERE slug = ?",
+            (slug,),
+        ).fetchone()
+        return self._row_to_tracker(row)
+
+    def insert_tracker_sample(self, tracker_id: int, ts: float, payload: dict[str, Any]) -> int:
+        cur = self.db.execute(
+            "INSERT INTO tracker_samples (tracker_id, ts, payload) VALUES (?, ?, ?)",
+            (tracker_id, ts, json.dumps(payload)),
+        )
+        self.db.commit()
+        return int(cur.lastrowid)
+
+    def upsert_tracker_rollup(
+        self,
+        tracker_id: int,
+        bucket: str,
+        metric: str,
+        value: float,
+        sample_id: int,
+    ) -> tuple[float | None, float]:
+        row = self.db.execute(
+            "SELECT value, sample_id FROM tracker_rollups "
+            "WHERE tracker_id = ? AND bucket = ? AND metric = ?",
+            (tracker_id, bucket, metric),
+        ).fetchone()
+        prev = float(row[0]) if row else None
+        if prev is None:
+            new_val = value
+            self.db.execute(
+                "INSERT INTO tracker_rollups (tracker_id, bucket, metric, value, sample_id) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (tracker_id, bucket, metric, new_val, sample_id),
+            )
+        else:
+            new_val = max(prev, value)
+            self.db.execute(
+                "UPDATE tracker_rollups SET value = ?, sample_id = ? "
+                "WHERE tracker_id = ? AND bucket = ? AND metric = ?",
+                (new_val, sample_id, tracker_id, bucket, metric),
+            )
+        self.db.commit()
+        return (prev, new_val)
+
+    def max_tracker_rollup_in_range(
+        self,
+        tracker_id: int,
+        metric: str,
+        *,
+        min_bucket: str,
+        max_bucket_exclusive: str,
+    ) -> float | None:
+        """Maximum rollup value for buckets in [min_bucket, max_bucket_exclusive)."""
+        row = self.db.execute(
+            "SELECT MAX(value) FROM tracker_rollups WHERE tracker_id = ? AND metric = ? "
+            "AND bucket >= ? AND bucket < ?",
+            (tracker_id, metric, min_bucket, max_bucket_exclusive),
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return float(row[0])
+
+    def query_tracker_samples(
+        self,
+        slug: str,
+        *,
+        since: float | None = None,
+        until: float | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        tr = self.get_tracker(slug)
+        if tr is None:
+            return []
+        sql = "SELECT id, ts, payload FROM tracker_samples WHERE tracker_id = ?"
+        params: list[Any] = [tr.id]
+        if since is not None:
+            sql += " AND ts >= ?"
+            params.append(since)
+        if until is not None:
+            sql += " AND ts <= ?"
+            params.append(until)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params.append(limit)
+        out: list[dict[str, Any]] = []
+        for sid, ts, payload in self.db.execute(sql, params).fetchall():
+            try:
+                pl = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                pl = {}
+            out.append({"id": sid, "ts": ts, "payload": pl})
+        return out
+
+    def query_tracker_rollups(
+        self,
+        slug: str,
+        *,
+        metric: str | None = None,
+        since_bucket: str | None = None,
+        until_bucket: str | None = None,
+    ) -> list[dict[str, Any]]:
+        tr = self.get_tracker(slug)
+        if tr is None:
+            return []
+        sql = "SELECT bucket, metric, value, sample_id FROM tracker_rollups WHERE tracker_id = ?"
+        params: list[Any] = [tr.id]
+        if metric:
+            sql += " AND metric = ?"
+            params.append(metric)
+        if since_bucket:
+            sql += " AND bucket >= ?"
+            params.append(since_bucket)
+        if until_bucket:
+            sql += " AND bucket <= ?"
+            params.append(until_bucket)
+        sql += " ORDER BY bucket, metric"
+        return [
+            {"bucket": r[0], "metric": r[1], "value": r[2], "sample_id": r[3]}
+            for r in self.db.execute(sql, params).fetchall()
+        ]
+
+    def record_tracker_alert(
+        self,
+        tracker_id: int,
+        rule_id: str,
+        payload: dict[str, Any],
+    ) -> int:
+        now = time.time()
+        cur = self.db.execute(
+            "INSERT INTO tracker_alerts (tracker_id, rule_id, triggered_at, payload, notified_at) "
+            "VALUES (?, ?, ?, ?, NULL)",
+            (tracker_id, rule_id, now, json.dumps(payload)),
+        )
+        self.db.commit()
+        return int(cur.lastrowid)
+
+    def mark_tracker_alert_notified(self, alert_id: int) -> None:
+        now = time.time()
+        self.db.execute(
+            "UPDATE tracker_alerts SET notified_at = ? WHERE id = ?",
+            (now, alert_id),
+        )
+        self.db.commit()
+
+    def tracker_alert_exists_for_day(
+        self,
+        tracker_id: int,
+        rule_id: str,
+        day_bucket: str,
+    ) -> bool:
+        """Dedupe: same rule + calendar day in payload['day_bucket']."""
+        rows = self.db.execute(
+            "SELECT payload FROM tracker_alerts WHERE tracker_id = ? AND rule_id = ?",
+            (tracker_id, rule_id),
+        ).fetchall()
+        for (raw,) in rows:
+            try:
+                d = json.loads(raw)
+                if isinstance(d, dict) and d.get("day_bucket") == day_bucket:
+                    return True
+            except (json.JSONDecodeError, TypeError):
+                continue
+        return False
+
+    @staticmethod
+    def utc_day_bucket(ts: float) -> str:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+
+    @staticmethod
+    def min_bucket_for_lookback(day_bucket: str, days: int) -> str:
+        d = datetime.strptime(day_bucket, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return (d - timedelta(days=max(0, days))).strftime("%Y-%m-%d")
+
+    def compact_tracker_storage(
+        self,
+        *,
+        sample_retention_days: int,
+        rollup_retention_days: int,
+        now: float | None = None,
+        vacuum: bool = False,
+    ) -> dict[str, int]:
+        now = now if now is not None else time.time()
+        cutoff_ts = now - max(0, sample_retention_days) * 86400
+        cur_s = self.db.execute("DELETE FROM tracker_samples WHERE ts < ?", (cutoff_ts,))
+        deleted_samples = cur_s.rowcount
+
+        day = datetime.fromtimestamp(now, tz=timezone.utc).date()
+        rollup_cutoff = day - timedelta(days=max(0, rollup_retention_days))
+        cutoff_bucket = rollup_cutoff.strftime("%Y-%m-%d")
+        cur_r = self.db.execute("DELETE FROM tracker_rollups WHERE bucket < ?", (cutoff_bucket,))
+        deleted_rollups = cur_r.rowcount
+
+        old_alerts = now - max(0, rollup_retention_days) * 86400 * 2
+        cur_a = self.db.execute("DELETE FROM tracker_alerts WHERE triggered_at < ?", (old_alerts,))
+        deleted_alerts = cur_a.rowcount
+
+        self.db.commit()
+        if vacuum:
+            self.db.execute("VACUUM")
+            self.db.commit()
+        return {
+            "deleted_samples": deleted_samples,
+            "deleted_rollups": deleted_rollups,
+            "deleted_alerts": deleted_alerts,
+        }
 
     def close(self) -> None:
         self.db.close()

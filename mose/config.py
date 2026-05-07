@@ -148,6 +148,23 @@ class PortalConfig:
 
 
 @dataclass
+class TrackersConfig:
+    """Scheduled data collection (trackers) and retention."""
+
+    enabled: bool = True
+    sample_retention_days: int = 14
+    rollup_retention_days: int = 730
+    reconcile_interval_seconds: int = 60
+    failure_threshold: int = 5
+    default_recipient: str = "signal:admin"
+    compaction_interval_hours: int = 24
+    compaction_startup_delay_seconds: int = 120
+    active_trackers_prompt_chars: int = 500
+    active_trackers_max_lines: int = 12
+    code_timeout_seconds: int = 60
+
+
+@dataclass
 class LearningConfig:
     """Skill proposal/learning loop and periodic skill-quality review.
 
@@ -185,6 +202,7 @@ class Config:
     agent: AgentConfig = field(default_factory=AgentConfig)
     terminal: TerminalConfig = field(default_factory=TerminalConfig)
     learning: LearningConfig = field(default_factory=LearningConfig)
+    trackers: TrackersConfig = field(default_factory=TrackersConfig)
     portal: PortalConfig = field(default_factory=PortalConfig)
     root_dir: Path = _ROOT
 
@@ -222,6 +240,8 @@ def load_config(config_path: Path | None = None) -> Config:
             _apply_section(cfg.terminal, raw["terminal"])
         if "learning" in raw:
             _apply_section(cfg.learning, raw["learning"])
+        if "trackers" in raw:
+            _apply_section(cfg.trackers, raw["trackers"])
         if "portal" in raw:
             _apply_section(cfg.portal, raw["portal"])
 
