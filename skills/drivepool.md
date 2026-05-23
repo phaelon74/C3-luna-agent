@@ -1,61 +1,21 @@
-# DrivePool (StableBit - Windows)
+# DrivePool (StableBit — Windows)
 
-## Connection
+**No MCP / Code Mode integration** for DrivePool. The agent sandbox does **not** have `DRIVEPOOL_HOST`, `DRIVEPOOL_USER`, or `DRIVEPOOL_PASSWORD`, and **pypsrp from the Linux agent container is not supported** in the current design.
 
-- Runs on a separate Windows machine
-- Access from Linux via `pypsrp` (PowerShell Remoting Protocol)
-- Env vars: `DRIVEPOOL_HOST`, `DRIVEPOOL_USER`, `DRIVEPOOL_PASSWORD`
-- Requires: WinRM enabled on Windows, `Enable-PSRemoting`
+## What Mose must not do
 
-## ReadOnly Runbooks
+- Inline `python3 -c "from pypsrp..."` blocks in bash using `$DRIVEPOOL_*` env vars
+- Pool rebalance or add/remove drive without explicit human approval on the Windows side
 
-Use `bash` for these — no approval required. Commands run via pypsrp from Linux.
+## What to do instead
 
-### Pool Status
-```bash
-python3 -c "
-from pypsrp.client import Client
-client = Client('$DRIVEPOOL_HOST', username='$DRIVEPOOL_USER', password='$DRIVEPOOL_PASSWORD', ssl=False)
-output, streams, had_errors = client.execute_ps('Get-Pool')
-print(output)
-"
-```
+1. Ask the operator to run StableBit DrivePool PowerShell on the Windows machine, or
+2. Use **`sre_execute`** with a very clear reason and `target_system` when an approved remediation must run on a host that has WinRM/pypsrp access (not from the default sandbox).
 
-### Physical Disks
-```bash
-python3 -c "
-from pypsrp.client import Client
-client = Client('$DRIVEPOOL_HOST', username='$DRIVEPOOL_USER', password='$DRIVEPOOL_PASSWORD', ssl=False)
-output, streams, had_errors = client.execute_ps('Get-PhysicalDisk')
-print(output)
-"
-```
+Future integration would be an MCP sidecar + Code Mode, not raw remoting from Mose bash.
 
-### Volume Info
-```bash
-python3 -c "
-from pypsrp.client import Client
-client = Client('$DRIVEPOOL_HOST', username='$DRIVEPOOL_USER', password='$DRIVEPOOL_PASSWORD', ssl=False)
-output, streams, had_errors = client.execute_ps('Get-Volume')
-print(output)
-"
-```
+## Reference (operator)
 
-Note: StableBit DrivePool uses custom PowerShell cmdlets. Adjust cmdlet names per StableBit documentation (e.g., `Get-StoragePool`, `Get-PhysicalDisk` for generic Windows storage).
-
-## Execute Runbooks
-
-Use `sre_execute` for these — requires human approval. **Extremely sensitive** — pool rebalance, add/remove drive can affect data.
-
-### Rebalance Pool
-```bash
-# StableBit-specific - consult docs for exact cmdlet
-python3 -c "
-from pypsrp.client import Client
-client = Client('$DRIVEPOOL_HOST', username='$DRIVEPOOL_USER', password='$DRIVEPOOL_PASSWORD', ssl=False)
-client.execute_ps('Invoke-StoragePoolRebalance')  # example - verify cmdlet
-"
-```
-
-### Add/Remove Drive
-Requires StableBit DrivePool PowerShell module. Always use `sre_execute` with explicit human approval.
+- WinRM / `Enable-PSRemoting` on the Windows pool host
+- StableBit cmdlets (names vary by version): pool status, physical disks, volumes
+- Rebalance / add-remove drive: **high risk** — always operator-approved

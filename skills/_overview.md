@@ -1,35 +1,52 @@
 # Cloud3 SRE Role
 
-Mose acts as an SRE (Site Reliability Engineer) for the Cloud3 environment. Use this knowledge when the user asks about infrastructure, media stack, storage, firewall, or troubleshooting.
+Mose runs in a **sandbox** (agent container or restricted host). Integrated backends (Plex, Sonarr, Radarr, NZBGet, paper_db) live on **other systems** with credentials only inside MCP sidecars — not in the agent shell.
 
-## Access Levels
+## How to reach systems
 
-- **ReadOnly (default)**: Use `bash` only for **allowlisted** read-only patterns (e.g. `systemctl status`, `journalctl`, `docker ps`/`logs`, `ls`, `cat`, `echo`, `python … .py` in workspace). Use `web_fetch` for HTTP reads to external URLs. **Plex / Sonarr / Radarr / NZBGet** are reached via Code Mode (`mcp-portal__portal_codemode_*`), not `bash`. Anything else must use `sre_execute`.
-- **Execute**: Use `sre_execute` for commands that modify state — restarts, config changes, updates, deletions, or any command outside the bash allowlist. Always requires human approval before running.
+| Class | How |
+|-------|-----|
+| **Integrated backends** (Plex, Sonarr, Radarr, NZBGet, paper_db) | **Code Mode only** — `mcp-portal__portal_codemode_search` then `mcp-portal__portal_codemode_execute` |
+| **This host** (service status, journal, local `docker ps`/`logs`, workspace files) | Allowlisted **`bash`** |
+| **State changes on this host** (restart, apt, ufw, destructive) | **`sre_execute`** (human approval) |
+| **Not integrated** (OPNsense, TrueNAS, Proxmox API, DrivePool WinRM) | **No API access from the sandbox** — do not `curl` or embed `$API_KEY` in bash; ask the operator or use `sre_execute` on an approved jump host |
 
-When in doubt: if the command changes anything (restart, write, delete, update), use `sre_execute`. If it only reads (status, logs, list, get), use `bash`.
+## Code Mode workflow (every integrated backend)
 
-## General Troubleshooting Approach
+1. **`mcp-portal__portal_codemode_search`** — `query` describes what you need (e.g. `"plex active sessions"`, `"sonarr queue"`).
+2. **`mcp-portal__portal_codemode_execute`** — TypeScript calling `mcp.<server_key>.<tool>(args)` and **`console.log(JSON.stringify(...))`** the facts you report.
+3. Read stdout only. If empty, log the raw object and fix field paths — do not invent data.
+4. Mutating MCP tools require **admin approval** (Signal/Discord).
 
-1. Check status first (service status, container health, API health)
-2. Check logs (journalctl, docker logs, application logs)
-3. Check resources (disk, memory, network)
-4. Then act — use `sre_execute` for any state-changing fix
+### MCP server keys (compose name → TypeScript)
+
+| Sidecar | `mcp.` key |
+|---------|------------|
+| plex-ops-admin | `plex_ops_admin` |
+| plex-stack-automation | `plex_stack_automation` |
+| sonarr-diagnostics | `sonarr_diagnostics` |
+| radarr-diagnostics | `radarr_diagnostics` |
+| nzbget-diagnostics | `nzbget_diagnostics` |
+| paper_db | `paper_db` |
+
+**Never** use `bash`, `curl`, `wget`, or `sre_execute` to call Plex / Sonarr / Radarr / NZBGet / paper_db HTTP APIs. Those commands are blocked and will fail without credentials.
+
+## Local host troubleshooting (when relevant)
+
+For “is the daemon up on **this** machine?” only:
+
+- `systemctl status <unit>` — allowlisted bash
+- `journalctl -u <unit> -n 50 --no-pager`
+- `docker ps` / `docker logs <mose-sidecar>` — see `docker.md`
+
+That is **not** a substitute for Plex/Sonarr/Radarr/NZBGet **application** status — use Code Mode for API truth.
+
+## General approach
+
+1. Code Mode (or local bash for host-only checks)
+2. Logs and resources on the host you can see
+3. `sre_execute` only when something must change and approval is acceptable
 
 ## Credentials
 
-API keys and credentials are stored in environment variables. Reference them in commands as `$VAR_NAME` (e.g., `$RADARR_API_KEY`). Never embed secrets in code or output.
-
-| System | Env Var(s) |
-|--------|------------|
-| Radarr | RADARR_API_KEY |
-| Sonarr | SONARR_API_KEY |
-| Plex | PLEX_TOKEN |
-| NZBGet | NZBGET_PASSWORD |
-| OPNsense | OPNSENSE_API_KEY, OPNSENSE_API_SECRET |
-| Proxmox | PROXMOX_API_TOKEN_ID, PROXMOX_API_TOKEN_SECRET |
-| TrueNAS | TRUENAS_API_KEY |
-| Pulsarr | PULSARR_API_KEY |
-| Huntarr | HUNTARR_API_KEY |
-| Homarr | HOMARR_API_KEY |
-| DrivePool | DRIVEPOOL_HOST, DRIVEPOOL_USER, DRIVEPOOL_PASSWORD |
+API keys exist only in MCP sidecar environments. Do not reference `$PLEX_TOKEN`, `$SONARR_API_KEY`, etc. in bash — the sandbox does not have them.

@@ -1,76 +1,63 @@
-# Docker (Pulsarr, Huntarr, Homarr)
+# Docker (agent host and sidecars)
 
-## Connection
+Mose's sandbox can run **allowlisted** `bash` against the local Docker socket (when configured). That covers **this host's** containers — not Plex/Sonarr/Radarr/NZBGet APIs.
 
-- Pulsarr: port 3003 (webhook integration for Plex watchlist → Sonarr/Radarr)
-- Huntarr: port 9705 (automated media search/upgrade)
-- Homarr: port 7575 (dashboard)
-- Containers may be named: pulsarr, huntarr, homarr (or as defined in compose)
+## Media stack and backends → Code Mode
 
-## ReadOnly Runbooks
+| Need | Use |
+|------|-----|
+| Plex / Sonarr / Radarr / NZBGet status, queue, sessions | Code Mode — see `plex.md`, `sonarr.md`, `radarr.md`, `nzbget.md` |
+| MCP sidecar health | `docker logs mose-plex-ops-admin --tail 50` (bash) |
+| Pulsarr / Huntarr / Homarr app data | No MCP sidecar today — `docker logs <container>` or ask operator; do not assume `$API_KEY` in bash |
 
-Use `bash` for these — no approval required.
+## Read-only on this host (`bash`)
 
-### List Containers
+### List containers
+
 ```bash
 docker ps
 docker ps -a
 ```
 
-### Container Logs
+### Logs
+
 ```bash
 docker logs <container_name> --tail 100
-docker logs -f <container_name>
+docker logs mose-mcp-portal --tail 100
+docker logs mose-sonarr-diagnostics --tail 50
 ```
 
-### Container Stats
+### Stats and inspect
+
 ```bash
 docker stats --no-stream
-```
-
-### Inspect Container
-```bash
 docker inspect <container_name>
 ```
 
-### Compose Status
+### Compose status
+
 ```bash
 docker compose ps
 ```
 
-### Check Health
-```bash
-curl -s http://localhost:3003/  # Pulsarr
-curl -s http://localhost:9705/  # Huntarr
-curl -s http://localhost:7575/  # Homarr
-```
+### HTTP reachability (dashboard apps on this host)
 
-## Execute Runbooks
+Use **`web_fetch`** for a simple GET to `http://localhost:<port>/` — not `curl` in bash.
 
-Use `sre_execute` for these — requires human approval.
+## Execute on this host (`sre_execute`, approval required)
 
-### Restart Container
 ```bash
 docker restart <container_name>
-```
-
-### Restart All (Compose)
-```bash
 docker compose restart
-```
-
-### Pull and Recreate
-```bash
 docker compose pull && docker compose up -d
-```
-
-### Prune Unused
-```bash
+docker compose down
+docker compose up -d
 docker system prune -f
 ```
 
-### Stop/Start Compose Stack
-```bash
-docker compose down
-docker compose up -d
-```
+Restarting **Plex/Sonarr/Radarr** application containers may be done via `sre_execute` when appropriate; **application status** still comes from Code Mode after they are up.
+
+## Do not
+
+- `docker exec` into MCP sidecars to bypass Code Mode (blocked by policy).
+- `curl` with `PLEX_TOKEN`, `SONARR_API_KEY`, etc. — credentials are not in the agent environment.

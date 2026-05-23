@@ -1,58 +1,72 @@
 # Plex Media Server
 
-## Connection
+Mose reaches Plex **only** through the MCP portal (Code Mode), not `bash`/`curl`. Plex runs on a different system; `PLEX_TOKEN` lives in the `plex-ops-admin` / `plex-stack-automation` sidecars only.
 
-- Port: 32400
-- API: http://<host>:32400/
-- Token env var: `PLEX_TOKEN`
-- Header: `X-Plex-Token: $PLEX_TOKEN`
-- Logs: `/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Logs/` (Linux) or container volume
+## Discovery
 
-## ReadOnly Runbooks
+1. `mcp-portal__portal_codemode_search` — e.g. `query="plex active sessions"` or `"plex server info"`.
+2. `mcp-portal__portal_codemode_execute` — TypeScript calling `mcp.plex_ops_admin.<tool>(...)` (or `mcp.plex_stack_automation` for stack/Trakt tools).
 
-Use `bash` for these — no approval required.
+Prefer **`plex_ops_admin`** for sessions, server health, libraries, and logs. Use **`plex_stack_automation`** when you need stack automation / Trakt / cross-arr helpers exposed on that server.
 
-### Sessions (Active Streams)
-```bash
-curl -s -H "X-Plex-Token: $PLEX_TOKEN" \
-  "http://localhost:32400/status/sessions"
+## Read-only examples (`plex_ops_admin`)
+
+### Active streams / sessions
+
+```ts
+const sessions = await mcp.plex_ops_admin.sessions_get_active({});
+console.log(JSON.stringify(sessions, null, 2));
 ```
 
-### Library Sections
-```bash
-curl -s -H "X-Plex-Token: $PLEX_TOKEN" \
-  "http://localhost:32400/library/sections"
+### Server info and resources
+
+```ts
+const info = await mcp.plex_ops_admin.server_get_info({});
+console.log(JSON.stringify(info, null, 2));
+
+const res = await mcp.plex_ops_admin.server_get_current_resources({});
+console.log(JSON.stringify(res, null, 2));
 ```
 
-### Section Content
-```bash
-curl -s -H "X-Plex-Token: $PLEX_TOKEN" \
-  "http://localhost:32400/library/sections/<id>/all"
+### Libraries and recent additions
+
+```ts
+const libs = await mcp.plex_ops_admin.library_list({});
+console.log(JSON.stringify(libs, null, 2));
+
+const recent = await mcp.plex_ops_admin.library_get_recently_added({ limit: 20 });
+console.log(JSON.stringify(recent, null, 2));
 ```
 
-### Logs
-```bash
-tail -100 "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Logs/Plex Media Server.log"
+### Plex server logs (via API tool, not host `tail`)
+
+```ts
+const logs = await mcp.plex_ops_admin.server_get_plex_logs({});
+console.log(JSON.stringify(logs, null, 2));
 ```
 
-## Execute Runbooks
+## Mutations (admin approval)
 
-Use `sre_execute` for these — requires human approval.
+Scan, refresh, butler tasks, session stop, etc. are **not** on the read allowlist — they trigger the normal portal mutation approval flow.
 
-### Scan Library
-```bash
-curl -s -X POST -H "X-Plex-Token: $PLEX_TOKEN" \
-  "http://localhost:32400/library/sections/<id>/refresh"
+```ts
+// Example shape only — search for the exact tool name first
+// const r = await mcp.plex_ops_admin.<mutating_tool>({ ... });
+// console.log(JSON.stringify(r, null, 2));
 ```
 
-### Optimize Database
+## Local service check (optional, this host only)
+
+If Plex Media Server runs **on the same machine as the agent**, you may use allowlisted bash **only** for process/unit state — not for API data:
+
 ```bash
-curl -s -X PUT -H "X-Plex-Token: $PLEX_TOKEN" \
-  "http://localhost:32400/library/optimize"
+systemctl status plexmediaserver --no-pager
 ```
 
-### Restart Service
-```bash
-systemctl restart plexmediaserver
-# or: docker restart plex
-```
+Do **not** `curl http://...:32400` or use `$PLEX_TOKEN` in bash.
+
+## Environment (sidecar)
+
+- `PLEX_URL`, `PLEX_TOKEN` — set on `plex-ops-admin` / `plex-stack-automation` containers only.
+
+See `INSTALL.md` and `docker-compose.yml` services `plex-ops-admin`, `plex-stack-automation`.

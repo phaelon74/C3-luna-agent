@@ -1,68 +1,72 @@
 # Radarr (Movie Management)
 
-## Connection
+Mose reaches Radarr **only** through the MCP portal (Code Mode), not `bash`/`curl`. Radarr runs on a different system; `RADARR_API_KEY` lives in the `radarr-diagnostics` sidecar only.
 
-- Port: 7878
-- API: http://<host>:7878/api/v3/
-- API key env var: `RADARR_API_KEY`
-- Header: `X-Api-Key: $RADARR_API_KEY`
-- Config/logs: `/var/lib/radarr/` or container volume
+## Discovery
 
-## ReadOnly Runbooks
+1. `mcp-portal__portal_codemode_search` — e.g. `query="radarr system status"` or `"radarr queue"`.
+2. `mcp-portal__portal_codemode_execute` — TypeScript calling `mcp.radarr_diagnostics.<tool>(...)`.
 
-Use `bash` for these — no approval required.
+Server key: `radarr_diagnostics`.
 
-### Health Check
-```bash
-curl -s -H "X-Api-Key: $RADARR_API_KEY" "http://localhost:7878/api/v3/health"
-```
+## Read-only examples
 
-### System Status
-```bash
-curl -s -H "X-Api-Key: $RADARR_API_KEY" "http://localhost:7878/api/v3/system/status"
+### Health and system status
+
+```ts
+const health = await mcp.radarr_diagnostics.radarr_get_health({});
+console.log(JSON.stringify(health, null, 2));
+
+const status = await mcp.radarr_diagnostics.radarr_get_system_status({});
+console.log(JSON.stringify(status, null, 2));
 ```
 
 ### Queue
-```bash
-curl -s -H "X-Api-Key: $RADARR_API_KEY" "http://localhost:7878/api/v3/queue"
+
+```ts
+const queue = await mcp.radarr_diagnostics.radarr_get_queue({});
+console.log(JSON.stringify(queue, null, 2));
 ```
 
 ### Movies
-```bash
-curl -s -H "X-Api-Key: $RADARR_API_KEY" "http://localhost:7878/api/v3/movie"
+
+```ts
+const movies = await mcp.radarr_diagnostics.radarr_get_movie({});
+console.log(JSON.stringify(movies, null, 2));
 ```
 
-### Logs
-Check `/var/lib/radarr/logs/` or container logs.
+### Logs (API)
 
-## Execute Runbooks
-
-Use `sre_execute` for these — requires human approval.
-
-### Trigger Search
-```bash
-curl -s -X POST -H "X-Api-Key: $RADARR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"MoviesSearch"}' \
-  "http://localhost:7878/api/v3/command"
+```ts
+const log = await mcp.radarr_diagnostics.radarr_get_log({});
+console.log(JSON.stringify(log, null, 2));
 ```
 
-### Refresh Movie
-```bash
-curl -s -X POST -H "X-Api-Key: $RADARR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"RefreshMovie","movieIds":[<id>]}' \
-  "http://localhost:7878/api/v3/command"
+### Download clients and disk space
+
+```ts
+const clients = await mcp.radarr_diagnostics.radarr_get_downloadclients({});
+console.log(JSON.stringify(clients, null, 2));
+
+const disk = await mcp.radarr_diagnostics.radarr_get_diskspace({});
+console.log(JSON.stringify(disk, null, 2));
 ```
 
-### Delete Movie
+## Mutations (admin approval)
+
+Search, refresh, manual import, deletes, etc. require portal mutation approval. Use Code Mode tools — never `curl` to `:7878`.
+
+## Local service check (optional, this host only)
+
 ```bash
-curl -s -X DELETE -H "X-Api-Key: $RADARR_API_KEY" \
-  "http://localhost:7878/api/v3/movie/<id>"
+systemctl status radarr --no-pager
+# or: docker logs mose-radarr-diagnostics --tail 50
 ```
 
-### Restart Service
-```bash
-systemctl restart radarr
-# or: docker restart radarr
-```
+Do **not** `curl` Radarr's API or use `$RADARR_API_KEY` in bash.
+
+## Environment (sidecar)
+
+- `RADARR_URL`, `RADARR_API_KEY` — on `radarr-diagnostics` only.
+
+See `INSTALL.md` **D.3.1** and `docker-compose.yml` service `radarr-diagnostics`.

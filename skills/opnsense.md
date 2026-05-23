@@ -1,48 +1,23 @@
 # OPNsense Firewall
 
-## Connection
+**No MCP / Code Mode integration** for OPNsense in the current stack. The agent sandbox does **not** have `OPNSENSE_API_KEY` or `OPNSENSE_API_SECRET`.
 
-- Web UI: typically https://opnsense-host/
-- API: https://opnsense-host/api/
-- API key env vars: `OPNSENSE_API_KEY`, `OPNSENSE_API_SECRET`
-- Auth: API key + secret in request headers or basic auth
+## What Mose must not do
 
-## ReadOnly Runbooks
+- `curl` / `wget` to `https://<opnsense-host>/api/...` from bash
+- Embed `$OPNSENSE_API_KEY` in shell or Python one-liners
 
-Use `bash` for these — no approval required.
+Those calls are wrong here and will fail or leak bad habits even if some pattern slipped past allowlists.
 
-### System Status
-```bash
-curl -s -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
-  "https://<opnsense-host>/api/core/system/status"
-```
+## What to do instead
 
-### Interface Statistics
-```bash
-curl -s -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
-  "https://<opnsense-host>/api/diagnostics/interface/getInterfaceStatistics"
-```
+1. Ask the operator to check the OPNsense UI (**System → Log Files**, **Interfaces**, **Firewall → Rules**), or
+2. Use **`sre_execute`** with a clear `target_system` and reason when an approved command must run **on a jump host or firewall** that has API/SSH access (not from the agent sandbox pretending it has keys).
 
-### Firewall Rules
-```bash
-curl -s -u "$OPNSENSE_API_KEY:$OPNSENSE_API_SECRET" \
-  "https://<opnsense-host>/api/firewall/filter/searchRule"
-```
+If OPNsense is added to the MCP portal later, use Code Mode the same way as Plex/Sonarr: `portal_codemode_search` → `portal_codemode_execute`.
 
-### View Logs
-Check OPNsense web UI: System > Log Files > Backend, or via API if available.
+## Reference (operator / future MCP)
 
-## Execute Runbooks
-
-Use `sre_execute` for these — requires human approval.
-
-### Add/Modify Firewall Rule
-API POST to `/api/firewall/filter/` — consult OPNsense API docs for payload format.
-
-### Restart Services
-```bash
-# Via API or SSH to OPNsense host
-```
-
-### Apply Config
-Changes often require applying config from the web UI or API.
+- Web UI: `https://<opnsense-host>/`
+- API base: `https://<opnsense-host>/api/`
+- Typical read endpoints: `/api/core/system/status`, `/api/diagnostics/interface/getInterfaceStatistics`, `/api/firewall/filter/searchRule`

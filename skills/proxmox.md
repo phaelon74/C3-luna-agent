@@ -1,76 +1,21 @@
 # Proxmox VE
 
-## Connection
+**No MCP / Code Mode integration** for Proxmox in the current stack. The agent sandbox does **not** have `PROXMOX_API_TOKEN_ID` / `PROXMOX_API_TOKEN_SECRET`, and **`qm` / `pct` / `pvesh` only work on a Proxmox node** — not inside the typical Mose agent container.
 
-- Web UI: https://proxmox-host:8006/
-- CLI: `qm` (VMs), `pct` (containers), `pvesh` (API)
-- API token env vars: `PROXMOX_API_TOKEN_ID`, `PROXMOX_API_TOKEN_SECRET`
-- Config: `/etc/pve/`
+## What Mose must not do
 
-## ReadOnly Runbooks
+- Pretend `qm list` or `pvesh get /nodes` from the agent sandbox will reach your cluster
+- `curl` the Proxmox API with token env vars from bash
 
-Use `bash` for these — no approval required.
+## What to do instead
 
-### List VMs
-```bash
-qm list
-```
+1. Ask the operator to use the Proxmox UI or run `qm`/`pct` on the node, or
+2. Use **`sre_execute`** with `target_system` describing the Proxmox host when an approved command must run **there** (SSH or API from a bastion).
 
-### VM Status
-```bash
-qm status <vmid>
-```
+Future Proxmox MCP would use Code Mode like other backends.
 
-### List Containers
-```bash
-pct list
-```
+## Reference (operator / future MCP)
 
-### Node Info
-```bash
-pvesh get /nodes
-pvesh get /cluster/resources
-```
-
-### Version
-```bash
-cat /etc/pve/.version
-```
-
-### Storage
-```bash
-zpool status
-zfs list
-```
-
-## Execute Runbooks
-
-Use `sre_execute` for these — requires human approval.
-
-### VM Control
-```bash
-qm start <vmid>
-qm stop <vmid>
-qm reboot <vmid>
-```
-
-### Container Control
-```bash
-pct start <ctid>
-pct stop <ctid>
-```
-
-### Backup
-```bash
-vzdump <vmid>
-```
-
-### Snapshot
-```bash
-qm snapshot <vmid> <snapname>
-```
-
-### Migrate
-```bash
-qm migrate <vmid> <target>
-```
+- UI: `https://<proxmox-host>:8006/`
+- CLI on node: `qm list`, `qm status <vmid>`, `pct list`, `pvesh get /cluster/resources`
+- Mutations: start/stop VM, backup, snapshot, migrate — approval required

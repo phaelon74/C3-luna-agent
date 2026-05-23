@@ -1,6 +1,6 @@
 # NZBGet (Usenet downloader)
 
-Mose reaches NZBGet **only** through the MCP portal (Code Mode), not `bash`/`curl`.
+Mose reaches NZBGet **only** through the MCP portal (Code Mode), not `bash`/`curl`. NZBGet runs on a different system; credentials live in the `nzbget-diagnostics` sidecar only.
 
 ## Discovery
 

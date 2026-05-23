@@ -1,68 +1,81 @@
 # Sonarr (TV Management)
 
-## Connection
+Mose reaches Sonarr **only** through the MCP portal (Code Mode), not `bash`/`curl`. Sonarr runs on a different system; `SONARR_API_KEY` lives in the `sonarr-diagnostics` sidecar only.
 
-- Port: 8989
-- API: http://<host>:8989/api/v3/
-- API key env var: `SONARR_API_KEY`
-- Header: `X-Api-Key: $SONARR_API_KEY`
-- Config/logs: `/var/lib/sonarr/` or container volume
+## Discovery
 
-## ReadOnly Runbooks
+1. `mcp-portal__portal_codemode_search` — e.g. `query="sonarr system status"` or `"sonarr queue"`.
+2. `mcp-portal__portal_codemode_execute` — TypeScript calling `mcp.sonarr_diagnostics.<tool>(...)`.
 
-Use `bash` for these — no approval required.
+Server key: `sonarr_diagnostics`.
 
-### Health Check
-```bash
-curl -s -H "X-Api-Key: $SONARR_API_KEY" "http://localhost:8989/api/v3/health"
-```
+## Read-only examples
 
-### System Status
-```bash
-curl -s -H "X-Api-Key: $SONARR_API_KEY" "http://localhost:8989/api/v3/system/status"
+### Health and system status
+
+```ts
+const health = await mcp.sonarr_diagnostics.sonarr_get_health({});
+console.log(JSON.stringify(health, null, 2));
+
+const status = await mcp.sonarr_diagnostics.sonarr_get_system_status({});
+console.log(JSON.stringify(status, null, 2));
 ```
 
 ### Queue
-```bash
-curl -s -H "X-Api-Key: $SONARR_API_KEY" "http://localhost:8989/api/v3/queue"
+
+```ts
+const queue = await mcp.sonarr_diagnostics.sonarr_get_queue({});
+console.log(JSON.stringify(queue, null, 2));
+
+const details = await mcp.sonarr_diagnostics.sonarr_get_queue_details({});
+console.log(JSON.stringify(details, null, 2));
 ```
 
 ### Series
-```bash
-curl -s -H "X-Api-Key: $SONARR_API_KEY" "http://localhost:8989/api/v3/series"
+
+```ts
+const series = await mcp.sonarr_diagnostics.sonarr_get_series({});
+console.log(JSON.stringify(series, null, 2));
 ```
 
-### Logs
-Check `/var/lib/sonarr/logs/` or container logs.
+### Logs (API)
 
-## Execute Runbooks
-
-Use `sre_execute` for these — requires human approval.
-
-### Trigger Search
-```bash
-curl -s -X POST -H "X-Api-Key: $SONARR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"SeriesSearch"}' \
-  "http://localhost:8989/api/v3/command"
+```ts
+const log = await mcp.sonarr_diagnostics.sonarr_get_log({});
+console.log(JSON.stringify(log, null, 2));
 ```
 
-### Refresh Series
-```bash
-curl -s -X POST -H "X-Api-Key: $SONARR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"name":"RefreshSeries","seriesIds":[<id>]}' \
-  "http://localhost:8989/api/v3/command"
+### Download clients and indexers
+
+```ts
+const clients = await mcp.sonarr_diagnostics.sonarr_get_downloadclients({});
+console.log(JSON.stringify(clients, null, 2));
+
+const indexers = await mcp.sonarr_diagnostics.sonarr_get_indexers({});
+console.log(JSON.stringify(indexers, null, 2));
 ```
 
-### Delete Series
-```bash
-curl -s -X DELETE -H "X-Api-Key: $SONARR_API_KEY" \
-  "http://localhost:8989/api/v3/series/<id>"
+## Mutations (admin approval)
+
+Commands, queue import, deletes, etc. require portal mutation approval. Search for the tool, then execute — do not use `curl` to `:8989`.
+
+```ts
+// Example: search finds sonarr_post_queue_import or similar — approval required
+// const r = await mcp.sonarr_diagnostics.<mutating_tool>({ ... });
+// console.log(JSON.stringify(r, null, 2));
 ```
 
-### Restart Service
+## Local service check (optional, this host only)
+
 ```bash
-systemctl restart sonarr
-# or: docker restart sonarr
+systemctl status sonarr --no-pager
+# or: docker logs mose-sonarr-diagnostics --tail 50
 ```
+
+Do **not** `curl` Sonarr's API or use `$SONARR_API_KEY` in bash.
+
+## Environment (sidecar)
+
+- `SONARR_URL`, `SONARR_API_KEY` — on `sonarr-diagnostics` only.
+
+See `INSTALL.md` **D.3.1** and `docker-compose.yml` service `sonarr-diagnostics`.

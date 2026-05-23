@@ -1,86 +1,58 @@
-# Linux (Ubuntu)
+# Linux (Ubuntu) — this host only
 
-## Connection
+Commands here apply to the **machine where Mose runs** (agent container host or bare-metal agent). They do **not** reach Plex, Sonarr, Radarr, NZBGet, or other remote APIs — use Code Mode for those (see `_overview.md`).
 
-Mose typically runs on the same Ubuntu host or can SSH to other hosts. Commands run in the workspace by default.
+## Read-only (`bash`, allowlisted)
 
-## ReadOnly Runbooks
+### Service status
 
-Use `bash` for these — no approval required.
-
-### Check Service Status
 ```bash
-systemctl status <service>
+systemctl status <service> --no-pager
 ```
 
-### View Logs
+### Logs
+
 ```bash
 journalctl -u <service> --no-pager -n 50
-journalctl -f -u <service>  # follow
 ```
 
-### Disk Usage
+### Disk and memory
+
 ```bash
 df -h
 du -sh /path
-```
-
-### Memory
-```bash
 free -m
 ```
 
 ### Network
+
 ```bash
 ip a
 ss -tlnp
 ```
 
-### Package Updates Available
+### Packages (read)
+
 ```bash
 apt list --upgradable
 ```
 
-### System Info
+### System info
+
 ```bash
 uptime
-top -bn1
 cat /etc/os-release
 ```
 
-### Common Log Paths
-- `/var/log/syslog`
-- `/var/log/auth.log`
-- Application logs often in `/var/log/<app>/` or `/var/lib/<app>/logs/`
+Common log paths: `/var/log/syslog`, `/var/log/auth.log`, `/var/log/<app>/`.
 
-## Execute Runbooks
+## Execute (`sre_execute`, approval required)
 
-Use `sre_execute` for these — requires human approval.
-
-### Restart Service
 ```bash
 systemctl restart <service>
-```
-
-### Package Updates
-```bash
 apt update && apt upgrade -y
-```
-
-### Firewall (UFW)
-```bash
 ufw allow <port>
-ufw deny <port>
-ufw reload
-```
-
-### User Management
-```bash
-useradd ...
-usermod ...
-```
-
-### Reboot
-```bash
 reboot
 ```
+
+Restarting a unit (e.g. `plexmediaserver`) only confirms the daemon on **this** box; Plex **content/API** status still requires Code Mode.
