@@ -8,7 +8,16 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+import openai
+
 from mose.config import Config, LearningConfig
+from mose.context_compress import (
+    compress_messages_if_needed,
+    compress_text_if_needed,
+    default_tool_result_token_budget,
+    init_context_compress,
+    max_input_tokens as compute_max_input_tokens,
+)
 from mose.learning import SkillLearner
 from mose.llm import LLMClient
 from mose.memory import MemoryManager
@@ -27,73 +36,10 @@ from mose.tools import (
 
 logger = get_logger("agent")
 
-CHARS_PER_TOKEN = 4.0  # heuristic for English/mixed content
 
-
-def _estimate_tokens(messages: list[dict]) -> int:
-    """Rough token estimate from message content."""
-    total = 0
-    for m in messages:
-        content = m.get("content") or ""
-        total += len(str(content))
-        for tc in m.get("tool_calls", []):
-            fn = tc.get("function")
-            args = fn.get("arguments", "") if isinstance(fn, dict) else str(tc)
-            total += len(str(args))
-    return int(total / CHARS_PER_TOKEN)
-
-
-def _get_message_blocks(messages: list[dict]) -> list[tuple[int, int]]:
-    """Return (start, end) indices for each logical block. Preserves assistant+tool pairs."""
-    blocks: list[tuple[int, int]] = []
-    i = 0
-    while i < len(messages):
-        m = messages[i]
-        role = m.get("role")
-        if role in ("system", "user"):
-            blocks.append((i, i + 1))
-            i += 1
-        elif role == "assistant":
-            tool_calls = m.get("tool_calls", [])
-            if not tool_calls:
-                blocks.append((i, i + 1))
-                i += 1
-            else:
-                blocks.append((i, i + 1 + len(tool_calls)))
-                i += 1 + len(tool_calls)
-        elif role == "tool":
-            blocks.append((i, i + 1))
-            i += 1
-        else:
-            blocks.append((i, i + 1))
-            i += 1
-    return blocks
-
-
-def _truncate_messages_to_fit(messages: list[dict], max_input_tokens: int) -> list[dict]:
-    """Keep system + most recent message blocks that fit within max_input_tokens."""
-    if not messages:
-        return messages
-    blocks = _get_message_blocks(messages)
-    system_block = blocks[0] if blocks and messages[blocks[0][0]].get("role") == "system" else None
-    rest_blocks = blocks[1:] if system_block else blocks
-    if not rest_blocks:
-        return messages
-    system_msgs = messages[system_block[0] : system_block[1]] if system_block else []
-    system_tokens = _estimate_tokens(system_msgs)
-    budget = max_input_tokens - system_tokens
-    if budget <= 0:
-        return system_msgs
-    # Keep tail of blocks that fit
-    kept: list[dict] = []
-    for start, end in reversed(rest_blocks):
-        block_msgs = messages[start:end]
-        block_tokens = _estimate_tokens(block_msgs)
-        if _estimate_tokens(kept) + block_tokens <= budget:
-            kept = block_msgs + kept
-        else:
-            break
-    return system_msgs + kept
+def _is_context_length_error(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return "maximum context length" in msg or "input_tokens" in msg
 
 
 def _coerce_tool_arguments(raw: Any) -> dict[str, Any]:
@@ -362,6 +308,7 @@ class Agent:
             memory=self.memory,
             get_scheduler=self._get_tracker_scheduler,
         )
+        init_context_compress(self.config)
 
     def _build_llm_tools(self, session_id: str) -> list[dict[str, Any]]:
         """Native tools plus MCP tools from connected servers (local list; never mutates ``NATIVE_TOOLS``)."""
@@ -386,6 +333,35 @@ class Agent:
         llm_tools.extend(mcp_tools)
         return llm_tools
 
+    async def _llm_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        max_input_tokens: int,
+        query_context: str,
+    ):
+        """Call the LLM; on context overflow, compress and retry once."""
+        kwargs_tools = tools if tools else None
+        try:
+            return await self.llm.chat(messages, tools=kwargs_tools)
+        except openai.BadRequestError as e:
+            if not _is_context_length_error(e):
+                raise
+            log_event(
+                logger,
+                "context_overflow_retry",
+                max_input_tokens=max_input_tokens,
+                message_count=len(messages),
+            )
+            reduced = max(4096, int(max_input_tokens * 0.85))
+            compressed = await compress_messages_if_needed(
+                messages,
+                llm=self.llm,
+                max_input_tokens=reduced,
+                query_context=query_context,
+            )
+            return await self.llm.chat(compressed, tools=kwargs_tools)
+
     async def process(
         self,
         message: str,
@@ -394,7 +370,17 @@ class Agent:
     ) -> str:
         """Process a user message and return the assistant's response."""
         with log_duration(logger, "agent_process", session_id=session_id):
-            return await self._process_inner(message, session_id, status_callback)
+            try:
+                return await self._process_inner(message, session_id, status_callback)
+            except openai.BadRequestError as e:
+                if _is_context_length_error(e):
+                    log_event(logger, "context_overflow_fatal", session_id=session_id)
+                    return (
+                        "I hit the model's context limit after many tool calls (often large "
+                        "queue/API dumps from Code Mode). Try a narrower question, or ask me to "
+                        "check fewer items at a time."
+                    )
+                raise
 
     async def _process_inner(self, message: str, session_id: str,
                               status_callback: Callable[[str, str], Any] | None = None) -> str:
@@ -431,11 +417,19 @@ class Agent:
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         messages.extend(recent)
 
-        max_input_tokens = self.config.llm.context_window - self.config.llm.max_tokens
+        input_budget = compute_max_input_tokens(
+            self.config.llm.context_window, self.config.llm.max_tokens, tools,
+        )
+        tool_result_budget = default_tool_result_token_budget(tools=tools)
 
         # 6. Call LLM
-        messages = _truncate_messages_to_fit(messages, max_input_tokens)
-        response = await self.llm.chat(messages, tools=tools if tools else None)
+        messages = await compress_messages_if_needed(
+            messages,
+            llm=self.llm,
+            max_input_tokens=input_budget,
+            query_context=message,
+        )
+        response = await self._llm_chat(messages, tools, input_budget, message)
 
         # 7. Tool call loop
         rounds = 0
@@ -507,6 +501,13 @@ class Agent:
                     logger.exception(f"Tool call failed: {tc.name}")
 
                 result = verify_tool_result(tc.name, result)
+                result = await compress_text_if_needed(
+                    result,
+                    llm=self.llm,
+                    query_context=message,
+                    max_output_tokens=tool_result_budget,
+                    source=tc.name,
+                )
                 if (
                     "Error" in result
                     or result.startswith("Tool error")
@@ -532,8 +533,13 @@ class Agent:
                 })
 
             # Call LLM again with tool results
-            messages = _truncate_messages_to_fit(messages, max_input_tokens)
-            response = await self.llm.chat(messages, tools=tools if tools else None)
+            messages = await compress_messages_if_needed(
+                messages,
+                llm=self.llm,
+                max_input_tokens=input_budget,
+                query_context=message,
+            )
+            response = await self._llm_chat(messages, tools, input_budget, message)
 
         if rounds >= self.max_tool_rounds:
             log_event(logger, "tool_loop_limit", session_id=session_id, rounds=rounds)
@@ -542,8 +548,13 @@ class Agent:
                 "role": "user",
                 "content": "You have reached the tool call limit. Please respond to the user with what you have so far. Do not call any more tools.",
             })
-            messages = _truncate_messages_to_fit(messages, max_input_tokens)
-            response = await self.llm.chat(messages)
+            messages = await compress_messages_if_needed(
+                messages,
+                llm=self.llm,
+                max_input_tokens=input_budget,
+                query_context=message,
+            )
+            response = await self._llm_chat(messages, None, input_budget, message)
 
         # 8. Thinking retry — model produced only reasoning after tool use
         content = response.content
@@ -557,8 +568,13 @@ class Agent:
                     "Please summarize what you found and answer the user's question."
                 ),
             })
-            messages = _truncate_messages_to_fit(messages, max_input_tokens)
-            response = await self.llm.chat(messages)  # no tools — forces text
+            messages = await compress_messages_if_needed(
+                messages,
+                llm=self.llm,
+                max_input_tokens=input_budget,
+                query_context=message,
+            )
+            response = await self._llm_chat(messages, None, input_budget, message)
             content = response.content
 
         content = content or "(no response)"

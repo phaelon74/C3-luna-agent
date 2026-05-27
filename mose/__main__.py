@@ -511,7 +511,7 @@ async def _run_skill_review_once(config, *, notify: bool) -> int:
     memory = MemoryManager(config.memory)
     mcp = MCPManager()
     # No MCP config load needed for a review run; keep startup light.
-    init_tool_registry(mcp)
+    init_tool_registry(mcp, config)
 
     # Register notify target (Signal if configured, else CLI stdout) before building Agent.
     if notify and signal_runtime_ready(config.signal):
@@ -595,7 +595,7 @@ async def main() -> None:
     mcp = MCPManager()
     mcp_config_path = config.root_dir / "mcp_servers.json"
     await mcp.load_servers(mcp_config_path)
-    init_tool_registry(mcp)
+    init_tool_registry(mcp, config)
 
     approval_bridge_handle: Any = None
     try:

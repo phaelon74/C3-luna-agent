@@ -682,6 +682,17 @@ class MemoryManager:
         msg_end = rows[-1][0]
         conversation = "\n".join(f"{role}: {content}" for _, role, content in rows)
 
+        from mose.context_compress import compress_text_if_needed, max_input_tokens
+
+        budget = max_input_tokens()
+        conversation = await compress_text_if_needed(
+            conversation,
+            llm=llm,
+            query_context="session memory extraction",
+            max_output_tokens=max(2048, budget // 4),
+            source=f"memory_{session_id}",
+        )
+
         # Ask LLM to summarize and extract facts
         extract_prompt = [
             {"role": "system", "content": (

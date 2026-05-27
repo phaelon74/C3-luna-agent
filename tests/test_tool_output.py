@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
+from mose.config import Config, ContextCompressConfig
+from mose.context_compress import init_context_compress
 from mose.tool_output import (
-    LARGE_OUTPUT_THRESHOLD,
     _persist_output,
-    _python_filter,
     process_large_output,
 )
+
+
+@pytest.fixture(autouse=True)
+def _compress_cfg():
+    cfg = Config()
+    cfg.context_compress = ContextCompressConfig(
+        enabled=True,
+        chunk_input_tokens=100,
+        large_output_threshold=100,
+    )
+    init_context_compress(cfg)
 
 
 class TestPersistOutput:
@@ -33,36 +46,6 @@ class TestPersistOutput:
         assert (tmp_path / "data" / "tool_outputs").is_dir()
 
 
-class TestPythonFilter:
-    def test_keyword_match(self):
-        raw = "line one\nPython is great\nline three\nJava is okay"
-        filtered = _python_filter(raw, "Python programming")
-        assert "Python" in filtered
-
-    def test_no_match_returns_head_tail(self):
-        lines = [f"line {i}" for i in range(100)]
-        raw = "\n".join(lines)
-        filtered = _python_filter(raw, "xyznonexistent")
-        # Should contain head lines
-        assert "line 0" in filtered
-        assert "line 1" in filtered
-
-    def test_context_lines_included(self):
-        lines = ["before", "match Python here", "after", "unrelated"]
-        raw = "\n".join(lines)
-        filtered = _python_filter(raw, "Python")
-        assert "before" in filtered
-        assert "after" in filtered
-
-    def test_truncation_on_large_filter(self):
-        # Generate content where every line matches
-        lines = [f"Python keyword line {i}" for i in range(5000)]
-        raw = "\n".join(lines)
-        filtered = _python_filter(raw, "Python keyword")
-        # Should be truncated
-        assert len(filtered) <= 5000  # MAX_FILTERED_SIZE + some margin
-
-
 class TestProcessLargeOutput:
     @pytest.mark.asyncio
     async def test_small_output_passthrough(self, tmp_path):
@@ -70,20 +53,18 @@ class TestProcessLargeOutput:
             "small output", "context", "test", None, root=tmp_path
         )
         assert result == "small output"
-        # No file should be created for small output
         output_dir = tmp_path / "data" / "tool_outputs"
         assert not output_dir.exists()
 
     @pytest.mark.asyncio
-    async def test_large_output_persisted(self, tmp_path):
-        raw = "x" * (LARGE_OUTPUT_THRESHOLD + 100)
+    async def test_large_output_compressed(self, tmp_path):
+        llm = MagicMock()
+        llm.chat = AsyncMock(return_value=MagicMock(content="relevant excerpt"))
+        raw = "x" * 5000
         result = await process_large_output(
-            raw, "context", "test", None, root=tmp_path
+            raw, "context", "test", llm, root=tmp_path
         )
-        # Should reference the persisted file
-        assert "Full output" in result
         assert "saved to" in result
-        # File should exist
         output_dir = tmp_path / "data" / "tool_outputs"
         assert output_dir.exists()
         files = list(output_dir.iterdir())
@@ -91,13 +72,10 @@ class TestProcessLargeOutput:
         assert files[0].read_text() == raw
 
     @pytest.mark.asyncio
-    async def test_large_output_with_keywords(self, tmp_path):
-        lines = [f"irrelevant padding line number {i} with extra text to make it longer" for i in range(500)]
-        lines[250] = "The Python programming language is very popular"
-        raw = "\n".join(lines)
-        assert len(raw) > LARGE_OUTPUT_THRESHOLD  # ensure we trigger the pipeline
+    async def test_large_output_without_llm(self, tmp_path):
+        raw = "x" * 5000
         result = await process_large_output(
-            raw, "Python programming", "test", None, root=tmp_path
+            raw, "context", "test", None, root=tmp_path
         )
-        assert "Python" in result
         assert "saved to" in result
+        assert (tmp_path / "data" / "tool_outputs").exists()

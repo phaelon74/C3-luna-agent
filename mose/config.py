@@ -44,6 +44,19 @@ class LLMConfig:
 
 
 @dataclass
+class ContextCompressConfig:
+    """Chunk-and-summarize when payloads would exceed the model context bound."""
+
+    enabled: bool = True
+    safety_margin_tokens: int = 4096
+    chunk_input_tokens: int = 12000
+    max_recursion_depth: int = 4
+    min_compress_tokens: int = 0
+    # Chars threshold before process_large_output considers compression (0 = derive from context).
+    large_output_threshold: int = 0
+
+
+@dataclass
 class DiscordConfig:
     token: str = ""
 
@@ -195,6 +208,7 @@ class LearningConfig:
 @dataclass
 class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
+    context_compress: ContextCompressConfig = field(default_factory=ContextCompressConfig)
     discord: DiscordConfig = field(default_factory=DiscordConfig)
     signal: SignalConfig = field(default_factory=SignalConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
@@ -226,6 +240,8 @@ def load_config(config_path: Path | None = None) -> Config:
             raw = tomllib.load(f)
         if "llm" in raw:
             _apply_section(cfg.llm, raw["llm"])
+        if "context_compress" in raw:
+            _apply_section(cfg.context_compress, raw["context_compress"])
         if "discord" in raw:
             _apply_section(cfg.discord, raw["discord"])
         if "signal" in raw:
@@ -274,6 +290,15 @@ def load_config(config_path: Path | None = None) -> Config:
         cfg.llm.provider = provider
     if (omit_temp := _env_optional_bool("LLM_OMIT_TEMPERATURE")) is not None:
         cfg.llm.omit_temperature = omit_temp
+
+    if (cc := _env_optional_bool("CONTEXT_COMPRESS_ENABLED")) is not None:
+        cfg.context_compress.enabled = cc
+    if (sm := os.environ.get("CONTEXT_COMPRESS_SAFETY_MARGIN")) is not None and str(sm).strip():
+        cfg.context_compress.safety_margin_tokens = int(sm)
+    if (ci := os.environ.get("CONTEXT_COMPRESS_CHUNK_TOKENS")) is not None and str(ci).strip():
+        cfg.context_compress.chunk_input_tokens = int(ci)
+    if (md := os.environ.get("CONTEXT_COMPRESS_MAX_DEPTH")) is not None and str(md).strip():
+        cfg.context_compress.max_recursion_depth = int(md)
 
     if (pe := _env_optional_bool("MOSE_PORTAL_ENABLED")) is not None:
         cfg.portal.enabled = pe

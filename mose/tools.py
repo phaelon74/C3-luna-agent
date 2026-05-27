@@ -19,11 +19,16 @@ from mose.bash_policy import (
 )
 from mose.mcp_write_policy import classify_mcp_tool
 from mose.observe import get_logger, log_event
+from mose.context_compress import (
+    compress_messages_if_needed,
+    compress_text_if_needed,
+    default_tool_result_token_budget,
+    max_input_tokens,
+)
 from mose.tool_output import LLMExtractor, process_large_output
 
 logger = get_logger("tools")
 
-BASH_MAX_OUTPUT = 20_000  # reduced from 50_000 to lower context pressure per tool call
 BASH_DEFAULT_TIMEOUT = 30
 BASH_MAX_TIMEOUT = 120
 LIST_DIR_MAX_ENTRIES = 500
@@ -86,10 +91,14 @@ _get_tracker_scheduler: Callable[[], Any] | None = None
 _tracker_propose_callback: Callable[..., Any] | None = None
 
 
-def init_tool_registry(mcp: "MCPManager") -> None:
+def init_tool_registry(mcp: "MCPManager", config: Any | None = None) -> None:
     """Register the MCP manager so meta-tools can discover and call MCP tools."""
     global _mcp_manager
     _mcp_manager = mcp
+    if config is not None:
+        from mose.context_compress import init_context_compress
+
+        init_context_compress(config)
 
 
 def init_approval(callback: Callable[[str, str, str], Any] | None) -> None:
@@ -679,7 +688,15 @@ def _truncate(text: str, limit: int) -> str:
     return text[:limit] + f"\n... (truncated, {len(text)} total chars)"
 
 
-async def _run_shell(command: str, timeout: int, cwd: str | None, *, require_allowlist: bool) -> str:
+async def _run_shell(
+    command: str,
+    timeout: int,
+    cwd: str | None,
+    *,
+    require_allowlist: bool,
+    llm: LLMExtractor | None = None,
+    query_context: str = "",
+) -> str:
     """Run via terminal backend; bash requires allowlist, sre_execute allows any non-dangerous command.
 
     Backend systems (Plex / Sonarr / Radarr / paper_db / MCP sidecars) are always rejected here
@@ -710,7 +727,15 @@ async def _run_shell(command: str, timeout: int, cwd: str | None, *, require_all
         output += ("\n--- stderr ---\n" if output else "") + res.stderr
     if res.exit_code != 0:
         output += f"\n(exit code: {res.exit_code})"
-    return _truncate(output, BASH_MAX_OUTPUT) if output else "(no output)"
+    if not output:
+        return "(no output)"
+    return await compress_text_if_needed(
+        output,
+        llm=llm,
+        query_context=query_context or command,
+        max_output_tokens=default_tool_result_token_budget(),
+        source="bash",
+    )
 
 
 async def _tool_bash(args: dict, **kwargs) -> str:
@@ -721,7 +746,14 @@ async def _tool_bash(args: dict, **kwargs) -> str:
     timeout = min(args.get("timeout", BASH_DEFAULT_TIMEOUT), BASH_MAX_TIMEOUT)
     cwd = args.get("cwd") or (_workspace and str(_workspace))
 
-    return await _run_shell(command, timeout, cwd, require_allowlist=True)
+    return await _run_shell(
+        command,
+        timeout,
+        cwd,
+        require_allowlist=True,
+        llm=kwargs.get("llm"),
+        query_context=kwargs.get("context", ""),
+    )
 
 
 async def _tool_sre_execute(args: dict, **kwargs) -> str:
@@ -757,7 +789,14 @@ async def _tool_sre_execute(args: dict, **kwargs) -> str:
     timeout = min(args.get("timeout", BASH_DEFAULT_TIMEOUT), BASH_MAX_TIMEOUT)
     cwd = _workspace and str(_workspace)
 
-    return await _run_shell(command, timeout, cwd, require_allowlist=False)
+    return await _run_shell(
+        command,
+        timeout,
+        cwd,
+        require_allowlist=False,
+        llm=kwargs.get("llm"),
+        query_context=kwargs.get("context", "") or reason,
+    )
 
 
 async def _tool_read_file(args: dict, context: str = "", llm=None, root=None, **kwargs) -> str:
@@ -1171,6 +1210,21 @@ def _get_delegate_tools() -> list[dict[str, Any]]:
     return [t for t in NATIVE_TOOLS if t["function"]["name"] in _DELEGATE_ALLOWED_TOOLS]
 
 
+async def _prepare_subagent_messages(
+    messages: list[dict[str, Any]],
+    task: str,
+    llm: LLMExtractor,
+    tools: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    budget = max_input_tokens(tools=tools)
+    return await compress_messages_if_needed(
+        messages,
+        llm=llm,
+        max_input_tokens=budget,
+        query_context=task,
+    )
+
+
 async def _tool_delegate(args: dict, context: str = "", llm=None, root=None, **kwargs) -> str:
     task = args.get("task", "")
     if not task:
@@ -1191,6 +1245,8 @@ async def _tool_delegate(args: dict, context: str = "", llm=None, root=None, **k
 
     log_event(logger, "delegate_start", task=task[:100])
 
+    tool_budget = default_tool_result_token_budget(tools=tools)
+    messages = await _prepare_subagent_messages(messages, task, llm, tools)
     response = await llm.chat(messages, tools=tools)
     rounds = 0
 
@@ -1225,12 +1281,21 @@ async def _tool_delegate(args: dict, context: str = "", llm=None, root=None, **k
             except Exception as e:
                 result = f"Tool error: {e}"
 
+            result = await compress_text_if_needed(
+                result,
+                llm=llm,
+                query_context=task,
+                max_output_tokens=tool_budget,
+                source=f"delegate_{tc.name}",
+                root=root,
+            )
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
                 "content": result,
             })
 
+        messages = await _prepare_subagent_messages(messages, task, llm, tools)
         response = await llm.chat(messages, tools=tools)
 
     if rounds >= _DELEGATE_MAX_ROUNDS:
@@ -1238,6 +1303,7 @@ async def _tool_delegate(args: dict, context: str = "", llm=None, root=None, **k
             "role": "user",
             "content": "You have reached the tool limit. Please provide your final answer now.",
         })
+        messages = await _prepare_subagent_messages(messages, task, llm, tools)
         response = await llm.chat(messages)
 
     final = response.content or "(sub-agent produced no response)"
@@ -1312,6 +1378,8 @@ async def _tool_code_task(args: dict, context: str = "", llm=None, root=None, **
 
     log_event(logger, "code_task_start", task=task[:100])
 
+    tool_budget = default_tool_result_token_budget(tools=tools)
+    messages = await _prepare_subagent_messages(messages, task, llm, tools)
     response = await llm.chat(messages, tools=tools, temperature=0.4)
     rounds = 0
 
@@ -1347,6 +1415,14 @@ async def _tool_code_task(args: dict, context: str = "", llm=None, root=None, **
                 result = f"Tool error: {e}"
 
             result = verify_tool_result(tc.name, result)
+            result = await compress_text_if_needed(
+                result,
+                llm=llm,
+                query_context=task,
+                max_output_tokens=tool_budget,
+                source=f"code_task_{tc.name}",
+                root=root,
+            )
 
             messages.append({
                 "role": "tool",
@@ -1354,6 +1430,7 @@ async def _tool_code_task(args: dict, context: str = "", llm=None, root=None, **
                 "content": result,
             })
 
+        messages = await _prepare_subagent_messages(messages, task, llm, tools)
         response = await llm.chat(messages, tools=tools, temperature=0.4)
 
     if rounds >= _CODE_TASK_MAX_ROUNDS:
@@ -1365,6 +1442,7 @@ async def _tool_code_task(args: dict, context: str = "", llm=None, root=None, **
                 "(3) how it was verified, (4) known issues or incomplete items."
             ),
         })
+        messages = await _prepare_subagent_messages(messages, task, llm, tools)
         response = await llm.chat(messages, temperature=0.4)
 
     final = response.content or "(code task produced no response)"
