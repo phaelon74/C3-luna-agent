@@ -1,0 +1,21 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "timestamp": "2026-05-27 04:09:41",
+      "host_cpu_utilization": 52.623,
+      "host_memory_utilization": 2.779,
+      "process_cpu_utilization": 52.875,
+      "process_memory_utilization": 1.163,
+      "timespan": 6
+    },
+    {
+      "timestamp": "2026-05-27 04:10:26",
+      "host_cpu_utilization": 7.223,
+      "host_memory_utilization": 2.609,
+      "process_cpu_utilization": 6.978,
+      "process_memory_utilization": 0.971,
+      "timespan": 6
+    }
+  ]
+}

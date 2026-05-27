@@ -1,0 +1,37 @@
+{
+  "status": "success",
+  "message": "Found 6 active sessions",
+  "sessions_count": 6,
+  "transcode_count": 4,
+  "direct_play_count": 2,
+  "total_bitrate_kbps": 47822,
+  "sessions": [
+    {
+      "session_id": 1,
+      "state": "playing",
+      "player_name": "Breezeway",
+      "user": "kevinphoy",
+      "content_type": "episode",
+      "player": {
+        "platform": "Roku",
+        "device": "Roku Streaming Stick+"
+      },
+      "progress": { "percent": 71.6, "minutes_remaining": 6 },
+      "content_description": "Search Party (2016) - S3E1 - The Accused Woman (TV Episode)",
+      "media_info": { "bitrate": "8495 kbps", "resolution": "1080p" },
+      "transcoding": { "active": true, "video": "h264 → h264", "audio": "ac3 → aac" }
+    },
+    {
+      "session_id": 4,
+      "state": "playing",
+      "player_name": "Apple TV",
+      "user": "Kevin Neville",
+      "content_type": "episode",
+      "player": { "device": "Apple TV" },
+      "progress": { "percent": 57.5 },
+      "content_description": "ted - S2E3 - Dungeons & Dealers (TV Episode)",
+      "media_info": { "bitrate": "8200 kbps" },
+      "transcoding": { "active": false, "mode": "Direct Play/Stream" }
+    }
+  ]
+}

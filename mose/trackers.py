@@ -460,7 +460,7 @@ class TrackerScheduler:
 
 
 def default_plex_codemode_collector() -> str:
-    """TypeScript body for portal_codemode_execute — Plex active sessions count."""
+    """TypeScript body for portal_codemode_execute — Plex active sessions count (raw XML shape)."""
     return (
         "const sessions = await mcp.plex_ops_admin.sessions_get_active({});\n"
         "const root = sessions && (sessions.MediaContainer || sessions);\n"
@@ -474,4 +474,104 @@ def default_plex_codemode_collector() -> str:
         "  if (v) transcodes++;\n"
         "}\n"
         'console.log(JSON.stringify({ metrics: { streams: n, transcodes: transcodes }, snapshot: {} }));\n'
+    )
+
+
+_PLEX_PARSE_HELPERS = """
+function parseMcp(raw) {
+  if (typeof raw === "string") {
+    try { return JSON.parse(raw); } catch { return null; }
+  }
+  return raw;
+}
+function resourceRows(raw) {
+  const v = parseMcp(raw);
+  if (!v || typeof v !== "object") return [];
+  if (v.status === "success" && Array.isArray(v.data)) return v.data;
+  if (Array.isArray(v)) return v;
+  return [];
+}
+function latestResourceRow(rows) {
+  if (!rows.length) return {};
+  let best = rows[0];
+  let bestTs = String(best.timestamp || "");
+  for (const r of rows) {
+    const ts = String(r.timestamp || "");
+    if (ts >= bestTs) { best = r; bestTs = ts; }
+  }
+  return best;
+}
+function parseBitrateKbps(val) {
+  const m = String(val ?? "").match(/(\\d+)/);
+  return m ? Number(m[1]) : 0;
+}
+function num(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+"""
+
+
+def default_plex_cpu_monitor_collector() -> str:
+    """TypeScript for plex-cpu-monitor — latest row from server_get_current_resources data[]."""
+    return (
+        _PLEX_PARSE_HELPERS
+        + """
+const raw = await mcp.plex_ops_admin.server_get_current_resources({});
+const latest = latestResourceRow(resourceRows(raw));
+const metrics = {
+  host_cpu_pct: num(latest.host_cpu_utilization),
+  host_memory_pct: num(latest.host_memory_utilization),
+  process_cpu_pct: num(latest.process_cpu_utilization),
+  process_memory_pct: num(latest.process_memory_utilization),
+};
+const snapshot = {
+  timestamp: latest.timestamp || null,
+  host_cpu_pct: metrics.host_cpu_pct,
+  host_memory_pct: metrics.host_memory_pct,
+  process_cpu_pct: metrics.process_cpu_pct,
+  process_memory_pct: metrics.process_memory_pct,
+};
+console.log(JSON.stringify({ metrics, snapshot }));
+"""
+    )
+
+
+def default_plex_viewers_collector() -> str:
+    """TypeScript for plex-viewers — flat sessions_get_active MCP shape."""
+    return (
+        _PLEX_PARSE_HELPERS
+        + """
+const body = parseMcp(await mcp.plex_ops_admin.sessions_get_active({}));
+const sessions = Array.isArray(body?.sessions) ? body.sessions : [];
+const viewers = num(body?.sessions_count ?? sessions.length);
+let transcodes = body?.transcode_count;
+if (transcodes == null) {
+  transcodes = 0;
+  for (const s of sessions) {
+    if (s?.transcoding?.active) transcodes++;
+  }
+}
+transcodes = num(transcodes);
+let directPlays = body?.direct_play_count;
+if (directPlays == null) directPlays = Math.max(0, viewers - transcodes);
+directPlays = num(directPlays);
+const totalKbps = num(body?.total_bitrate_kbps ?? 0);
+const metrics = {
+  viewers,
+  transcodes,
+  direct_plays: directPlays,
+  total_bandwidth_mbps: Math.round((totalKbps / 1024) * 100) / 100,
+};
+const snapshot = sessions.map((s) => ({
+  user: s?.user ?? null,
+  device: s?.player?.device ?? s?.player_name ?? "Unknown",
+  title: s?.content_description ?? "Unknown",
+  type: s?.content_type ?? null,
+  transcode: !!s?.transcoding?.active,
+  bitrate_kbps: parseBitrateKbps(s?.media_info?.bitrate),
+  progress_pct: num(s?.progress?.percent),
+}));
+console.log(JSON.stringify({ metrics, snapshot }));
+"""
     )

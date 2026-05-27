@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -132,6 +133,43 @@ async def test_tracker_proposal_approve_creates_row(memory: MemoryManager) -> No
     row = memory.get_pending_approval("newtrak")
     assert row is not None
     assert row.status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_codemode_unwrap_populates_metrics(memory: MemoryManager) -> None:
+    """portal_codemode_execute wrapper stdout must be parsed into metrics."""
+    collector_out = json.dumps({
+        "metrics": {"host_cpu_pct": 7.2, "host_memory_pct": 2.6},
+        "snapshot": {"timestamp": "2026-05-27 04:10:26"},
+    })
+    wrapper = json.dumps({
+        "stdout": collector_out,
+        "stderr": "",
+        "return_value": None,
+        "duration_ms": 42,
+        "errors": [],
+    })
+
+    async def fake_codemode(_code: str, _timeout: int) -> tuple[str, bool]:
+        return wrapper, False
+
+    memory.create_tracker(
+        slug="cpu-test",
+        description="unwrap test",
+        collector_kind="codemode",
+        collector_ref="console.log('x');",
+        schedule_seconds=3600,
+        alert_rules=[],
+    )
+    sch = TrackerScheduler(
+        memory,
+        TrackersConfig(),
+        execute_codemode=fake_codemode,
+    )
+    await sch.run_once("cpu-test")
+    samples = memory.query_tracker_samples("cpu-test", limit=1)
+    assert samples[0]["payload"]["metrics"]["host_cpu_pct"] == 7.2
+    assert samples[0]["payload"]["metrics"]["host_memory_pct"] == 2.6
 
 
 def test_compact_tracker_storage(memory: MemoryManager) -> None:

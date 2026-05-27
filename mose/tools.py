@@ -509,7 +509,41 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "enabled_only": {"type": "boolean", "description": "If true, only enabled trackers."},
+                    "include_collector": {
+                        "type": "boolean",
+                        "description": "If true, include collector_kind and collector_ref for debugging.",
+                    },
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tracker_update",
+            "description": (
+                "Update an existing tracker in place (operator tool — no approval). "
+                "Use to fix collector_codemode or pause/resume. Prefer after probing API shape."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "Tracker slug to update."},
+                    "collector_codemode": {
+                        "type": "string",
+                        "description": "New TypeScript body when collector_kind is codemode.",
+                    },
+                    "enabled": {"type": "boolean", "description": "Enable or disable the tracker."},
+                    "schedule_seconds": {
+                        "type": "integer",
+                        "description": "New collection interval in seconds.",
+                    },
+                    "reset_failures": {
+                        "type": "boolean",
+                        "description": "If true, clear consecutive_failures and last_status.",
+                    },
+                },
+                "required": ["slug"],
             },
         },
     },
@@ -1453,9 +1487,11 @@ async def _tool_tracker_list(args: dict, **kwargs) -> str:
     if _tracker_memory is None:
         return "Error: tracker subsystem not initialized."
     enabled_only = bool(args.get("enabled_only", False))
+    include_collector = bool(args.get("include_collector", False))
     rows = _tracker_memory.list_trackers(enabled_only=enabled_only)
-    out = [
-        {
+    out = []
+    for t in rows:
+        row: dict[str, Any] = {
             "slug": t.slug,
             "description": t.description,
             "enabled": t.enabled,
@@ -1464,9 +1500,45 @@ async def _tool_tracker_list(args: dict, **kwargs) -> str:
             "last_status": t.last_status,
             "consecutive_failures": t.consecutive_failures,
         }
-        for t in rows
-    ]
+        if include_collector:
+            row["collector_kind"] = t.collector_kind
+            row["collector_ref"] = t.collector_ref
+        out.append(row)
     return json.dumps(out, indent=2)
+
+
+async def _tool_tracker_update(args: dict, **kwargs) -> str:
+    if _tracker_memory is None:
+        return "Error: tracker subsystem not initialized."
+    slug = str(args.get("slug") or "").strip()
+    if not _VALID_TRACKER_SLUG.match(slug):
+        return "Error: slug must match kebab-case [a-z0-9]+(-[a-z0-9]+)*."
+    if _tracker_memory.get_tracker(slug) is None:
+        return f"Error: unknown tracker '{slug}'."
+    fields: dict[str, Any] = {}
+    ref = str(args.get("collector_codemode") or "").strip()
+    if ref:
+        fields["collector_ref"] = ref
+        fields["collector_kind"] = "codemode"
+    if "enabled" in args and args["enabled"] is not None:
+        fields["enabled"] = bool(args["enabled"])
+    if args.get("schedule_seconds") is not None:
+        try:
+            sec = int(args["schedule_seconds"])
+        except (TypeError, ValueError):
+            return "Error: schedule_seconds must be an integer."
+        fields["schedule_seconds"] = max(5, min(sec, 86400))
+    if bool(args.get("reset_failures", False)):
+        fields["consecutive_failures"] = 0
+        fields["last_status"] = None
+    if not fields:
+        return "Error: provide at least one of collector_codemode, enabled, schedule_seconds, reset_failures."
+    if not _tracker_memory.update_tracker(slug, **fields):
+        return f"Error: update failed for '{slug}'."
+    sch = _get_tracker_scheduler() if _get_tracker_scheduler else None
+    if sch is not None:
+        await sch.reconcile()
+    return f"Tracker '{slug}' updated: {', '.join(fields.keys())}."
 
 
 async def _tool_tracker_query(args: dict, **kwargs) -> str:
@@ -1552,6 +1624,7 @@ _TOOL_REGISTRY: dict[str, Any] = {
     "tracker_propose": _tool_tracker_propose,
     "tracker_delete_propose": _tool_tracker_delete_propose,
     "tracker_list": _tool_tracker_list,
+    "tracker_update": _tool_tracker_update,
     "tracker_query": _tool_tracker_query,
     "tracker_pause": _tool_tracker_pause,
     "tracker_resume": _tool_tracker_resume,

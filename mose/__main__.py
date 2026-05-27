@@ -34,7 +34,12 @@ from mose.tools import (
     init_tracker_propose_callback,
     init_workspace,
 )
-from mose.trackers import default_plex_codemode_collector, init_tracker_alert_callback
+from mose.trackers import (
+    default_plex_codemode_collector,
+    default_plex_cpu_monitor_collector,
+    default_plex_viewers_collector,
+    init_tracker_alert_callback,
+)
 from mose.tracker_decision import handle_tracker_decision, init_tracker_decision_runtime
 
 
@@ -258,15 +263,14 @@ def _run_seed_tracker_cli(config, name: str) -> int:
         if memory.get_tracker(name):
             print(f"tracker '{name}' already exists")
             return 1
-        if name == "plex_streams":
-            memory.create_tracker(
-                slug="plex_streams",
-                description="Plex active sessions / transcodes (seeded)",
-                collector_kind="codemode",
-                collector_ref=default_plex_codemode_collector(),
-                schedule_seconds=300,
-                aggregations=["streams", "transcodes"],
-                alert_rules=[
+        seeds: dict[str, dict] = {
+            "plex_streams": {
+                "slug": "plex_streams",
+                "description": "Plex active sessions / transcodes (seeded)",
+                "collector_ref": default_plex_codemode_collector(),
+                "schedule_seconds": 300,
+                "aggregations": ["streams", "transcodes"],
+                "alert_rules": [
                     {
                         "id": "streams_record",
                         "type": "new_daily_high",
@@ -274,12 +278,74 @@ def _run_seed_tracker_cli(config, name: str) -> int:
                         "lookback_days": 30,
                     }
                 ],
-                recipients=[config.trackers.default_recipient],
+            },
+            "plex_cpu_monitor": {
+                "slug": "plex-cpu-monitor",
+                "description": "Plex host/process CPU and memory (latest resources sample)",
+                "collector_ref": default_plex_cpu_monitor_collector(),
+                "schedule_seconds": 300,
+                "aggregations": [
+                    "host_cpu_pct",
+                    "host_memory_pct",
+                    "process_cpu_pct",
+                    "process_memory_pct",
+                ],
+                "alert_rules": [],
+            },
+            "plex_viewers": {
+                "slug": "plex-viewers",
+                "description": "Plex active viewers, transcodes, bandwidth, per-session snapshot",
+                "collector_ref": default_plex_viewers_collector(),
+                "schedule_seconds": 300,
+                "aggregations": ["viewers", "transcodes", "direct_plays", "total_bandwidth_mbps"],
+                "alert_rules": [],
+            },
+        }
+        spec = seeds.get(name)
+        if spec is None:
+            print(f"Unknown seed name '{name}'. Try: {', '.join(sorted(seeds))}")
+            return 2
+        memory.create_tracker(
+            slug=spec["slug"],
+            description=spec["description"],
+            collector_kind="codemode",
+            collector_ref=spec["collector_ref"],
+            schedule_seconds=spec["schedule_seconds"],
+            aggregations=spec["aggregations"],
+            alert_rules=spec["alert_rules"],
+            recipients=[config.trackers.default_recipient],
+        )
+        print(f"Seeded tracker '{spec['slug']}' (approve not required — direct insert).")
+        return 0
+    finally:
+        memory.close()
+
+
+def _run_apply_plex_trackers_cli(config) -> int:
+    """Patch plex-cpu-monitor and plex-viewers collectors from built-in templates."""
+    memory = MemoryManager(config.memory)
+    try:
+        updates = [
+            ("plex-cpu-monitor", default_plex_cpu_monitor_collector()),
+            ("plex-viewers", default_plex_viewers_collector()),
+        ]
+        applied: list[str] = []
+        missing: list[str] = []
+        for slug, ref in updates:
+            if memory.get_tracker(slug) is None:
+                missing.append(slug)
+                continue
+            memory.update_tracker(
+                slug,
+                collector_ref=ref,
+                collector_kind="codemode",
+                consecutive_failures=0,
+                last_status=None,
+                enabled=True,
             )
-            print(f"Seeded tracker '{name}' (approve not required — direct insert).")
-            return 0
-        print(f"Unknown seed name '{name}'. Try: plex_streams")
-        return 2
+            applied.append(slug)
+        print(json.dumps({"applied": applied, "missing": missing}, indent=2))
+        return 0 if applied else (2 if missing else 1)
     finally:
         memory.close()
 
@@ -341,7 +407,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--seed-tracker",
         metavar="NAME",
-        help="Insert a built-in tracker row (e.g. plex_streams) and exit.",
+        help="Insert a built-in tracker row (e.g. plex_streams, plex_cpu_monitor, plex_viewers) and exit.",
+    )
+    parser.add_argument(
+        "--apply-plex-trackers",
+        action="store_true",
+        help="Update plex-cpu-monitor and plex-viewers collector_ref from built-in templates and exit.",
     )
     parser.add_argument(
         "--tracker-run-now",
@@ -498,6 +569,10 @@ async def main() -> None:
     if args.seed_tracker:
         log_event(logger, "seed_tracker_cli", name=args.seed_tracker)
         sys.exit(_run_seed_tracker_cli(config, args.seed_tracker.strip()))
+
+    if args.apply_plex_trackers:
+        log_event(logger, "apply_plex_trackers_cli")
+        sys.exit(_run_apply_plex_trackers_cli(config))
 
     if args.tracker_run_now:
         print(

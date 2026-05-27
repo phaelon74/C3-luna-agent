@@ -70,3 +70,20 @@ Do **not** `curl http://...:32400` or use `$PLEX_TOKEN` in bash.
 - `PLEX_URL`, `PLEX_TOKEN` — set on `plex-ops-admin` / `plex-stack-automation` containers only.
 
 See `INSTALL.md` and `docker-compose.yml` services `plex-ops-admin`, `plex-stack-automation`.
+
+## Tracker collectors (`plex-cpu-monitor`, `plex-viewers`)
+
+Scheduled trackers use the same Code Mode path but must `console.log` `{"metrics":{...},"snapshot":...}`.
+
+| Tracker | MCP tool | Key shape |
+| ------- | -------- | --------- |
+| `plex-cpu-monitor` | `server_get_current_resources` | `{ status, data: [ rows ] }` — use **latest `timestamp` row** only; values are 0–100% snake_case floats |
+| `plex-viewers` | `sessions_get_active` | `{ sessions_count, total_bitrate_kbps, sessions: [...] }` — not MediaContainer |
+
+**Bandwidth:** `total_bandwidth_mbps = total_bitrate_kbps / 1024`. Per-session `media_info.bitrate` is `"NNNN kbps"` (parse digits).
+
+**Deploy fix on host:** `docker compose exec mose-agent python -m mose --apply-plex-trackers`
+
+**Probe script:** `scripts/plex_tracker_probe.py` (run inside `mose-agent`).
+
+Full conventions: `skills/codemode-collector-conventions.md`.
