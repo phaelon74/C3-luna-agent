@@ -42,7 +42,7 @@ docker compose ps
 
 ### HTTP reachability (dashboard apps on this host)
 
-Use **`web_fetch`** for a simple GET to `http://localhost:<port>/` — not `curl` in bash.
+Use **`web_fetch`** for a simple GET to `http://localhost:<port>/` on **this host** (dashboards, vLLM, etc.) — not for Plex (`32400`) or *arr ports; those use Code Mode.
 
 ## Execute on this host (`sre_execute`, approval required)
 

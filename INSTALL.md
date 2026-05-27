@@ -489,8 +489,14 @@ they are copied into the image (`COPY . .`). To override without rebuilding, bin
    `PLEX_URL` / `PLEX_TOKEN` are exported in your shell or rely on values inside the container):
 
 ```bash
-docker compose exec plex-ops-admin sh -lc \
-  'curl -sS -m 5 "${PLEX_URL}/identity?X-Plex-Token=${PLEX_TOKEN}" | head -c 200'
+docker compose exec -T plex-ops-admin python - <<'PY'
+import os, urllib.request
+
+base = os.environ["PLEX_URL"].rstrip("/")
+tok = os.environ["PLEX_TOKEN"]
+url = f"{base}/identity?X-Plex-Token={tok}"
+print(urllib.request.urlopen(url, timeout=5).read()[:200])
+PY
 ```
 
 ### D.2 Gather Sonarr credentials (`SONARR_URL`, `SONARR_API_KEY`)
@@ -502,12 +508,7 @@ docker compose exec plex-ops-admin sh -lc \
 3. **Permissions:** Sonarr exposes one **full-access** API key; read and write API
    routes share it. Network isolation plus Mose’s MCP write policy (section D.6)
    limit damage.
-4. **Check:**
-
-```bash
-docker compose exec plex-stack-automation sh -lc \
-  'curl -sS -m 10 -H "X-Api-Key: ${SONARR_API_KEY}" "${SONARR_URL}/api/v3/system/status"'
-```
+4. **Check:** after the `sonarr-diagnostics` sidecar is up and env is set, use the httpx smoke-check in **D.3.1** (same pattern as Sonarr).
 
 ### D.3 Gather Radarr credentials (`RADARR_URL`, `RADARR_API_KEY`)
 
@@ -515,12 +516,7 @@ Same pattern as Sonarr:
 
 1. **`RADARR_URL`** — e.g. `http://10.4.251.12:7878` (no `/api/v3` suffix).
 2. **`RADARR_API_KEY`** — **Settings → General → Security → API Key**.
-3. **Check:**
-
-```bash
-docker compose exec plex-stack-automation sh -lc \
-  'curl -sS -m 10 -H "X-Api-Key: ${RADARR_API_KEY}" "${RADARR_URL}/api/v3/system/status"'
-```
+3. **Check:** after the `radarr-diagnostics` sidecar is up and env is set, run the Sonarr httpx block in **D.3.1** against `RADARR_URL` / `RADARR_API_KEY` from the `radarr-diagnostics` container.
 
 Very large Radarr libraries (20k+ movies) may make the first `radarr_get_movies` MCP
 call take on the order of **30 seconds**; that is expected for niavasha’s server.

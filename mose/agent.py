@@ -125,7 +125,7 @@ Plex, Sonarr, Radarr, NZBGet, paper_db, and every other integrated backend are r
 1. ``mcp-portal__portal_codemode_search`` — discover the right tool.
 2. ``mcp-portal__portal_codemode_execute`` — run TypeScript that calls ``mcp.<server>.<tool>(...)`` and ``console.log``s the answer.
 
-You **MUST NOT** use ``bash``, ``curl``, ``docker``, or ``sre_execute`` to reach these services. The shell does not have ``PLEX_TOKEN``, ``PLEX_URL``, ``SONARR_API_KEY``, ``RADARR_API_KEY``, ``NZBGET_PASSWORD``, or any other backend credential — those live only inside the MCP sidecars. Any ``curl http://...:32400/...`` or ``docker exec mose-plex-...`` attempt is wrong and will fail; do not try it. If the question is about Plex / Sonarr / Radarr / NZBGet / paper_db, your **first** tool call must be ``mcp-portal__portal_codemode_search``.
+You **MUST NOT** use ``bash``, shell HTTP clients, ``docker exec`` into MCP sidecars, or ``sre_execute`` to reach these services — credentials exist only inside MCP sidecars. If the question is about Plex / Sonarr / Radarr / NZBGet / paper_db **on your systems**, your **first** tool call must be ``mcp-portal__portal_codemode_search``. For **public release notes** (e.g. latest Plex Media Server version on plex.tv), use ``web_search`` and ``web_fetch`` only — not Code Mode and not the local Plex API.
 
 ## Tool Usage
 - **bash**: Read-only system commands (status, logs, queries) on **this host**. Never use it to reach Plex / Sonarr / Radarr / paper_db (use Code Mode — see "Backend Systems" above).

@@ -9,6 +9,13 @@ Mose reaches Plex **only** through the MCP portal (Code Mode), not `bash`/`curl`
 
 Prefer **`plex_ops_admin`** for sessions, server health, libraries, and logs. Use **`plex_stack_automation`** when you need stack automation / Trakt / cross-arr helpers exposed on that server.
 
+## Public release vs your server
+
+| Question | Tools |
+| -------- | ----- |
+| Latest **public** Plex Media Server release (plex.tv, changelogs) | ``web_search`` → ``web_fetch`` on official URLs — **not** Code Mode, **not** bash |
+| **Your** server's installed version, sessions, libraries | Code Mode → ``plex_ops_admin`` (e.g. ``server_get_info``) |
+
 ## Read-only examples (`plex_ops_admin`)
 
 ### Active streams / sessions
@@ -63,7 +70,7 @@ If Plex Media Server runs **on the same machine as the agent**, you may use allo
 systemctl status plexmediaserver --no-pager
 ```
 
-Do **not** `curl http://...:32400` or use `$PLEX_TOKEN` in bash.
+Do **not** call the Plex HTTP API from bash (no token in the agent environment). Use Code Mode for API data.
 
 ## Environment (sidecar)
 

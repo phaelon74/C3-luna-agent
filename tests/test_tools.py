@@ -154,6 +154,10 @@ class TestBashAllowlist:
 class TestBackendTargetBlock:
     def test_curl_against_backend_ports_blocked(self):
         assert is_backend_target('curl -H "X-Plex-Token: $PLEX_TOKEN" http://localhost:32400/status/sessions')
+        assert is_backend_target(
+            'curl -s -H "X-Plex-Token: $PLEX_TOKEN" "http://localhost:32400/?X-Plex-Client-Identifier=foo"'
+        )
+        assert is_backend_target("wget http://localhost:32400/identity")
         assert is_backend_target('curl -H "X-Api-Key: $SONARR_API_KEY" http://localhost:8989/api/v3/queue')
         assert is_backend_target('wget http://radarr:7878/api/v3/movie')
         assert is_backend_target('curl -s -u "nzbget:$NZBGET_PASSWORD" http://localhost:6789/jsonrpc')

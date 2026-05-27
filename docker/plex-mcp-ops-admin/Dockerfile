@@ -3,7 +3,7 @@
 FROM python:3.11-slim-bookworm
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini ca-certificates curl \
+    && apt-get install -y --no-install-recommends tini ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Pin to match upstream GitHub release v1.1.7

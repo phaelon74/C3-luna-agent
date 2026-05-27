@@ -91,8 +91,11 @@ _BACKEND_TARGET_PATTERNS: list[re.Pattern[str]] = [
         r"\bdocker\s+exec\b[^\n]*?\bmose-(plex-|sonarr-|radarr-|nzbget-|mcp-portal\b|mcp-codemode-)",
         # /api/v3 paths are *arr APIs
         r"\b(curl|wget|http|httpie)\b[^\n]*?/api/v3/",
-        # Plex-specific request headers in shell
+        # Plex-specific request headers / host:port in shell (even without curl)
         r"X-Plex-Token",
+        r"X-Plex-Client",
+        r"\blocalhost:32400(\b|/)",
+        r":32400/\?",
     ]
 ]
 
