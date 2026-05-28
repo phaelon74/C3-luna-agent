@@ -50,3 +50,10 @@ That is **not** a substitute for Plex/Sonarr/Radarr/NZBGet **application** statu
 ## Credentials
 
 API keys exist only in MCP sidecar environments. Do not reference `$PLEX_TOKEN`, `$SONARR_API_KEY`, etc. in bash — the sandbox does not have them.
+
+## Queue purge skills
+
+| Skill | Use |
+|-------|-----|
+| **purge-queue-samples** | List and remove Sonarr/Radarr queue rows that are sample-only downloads (Code Mode; `load_skill` for full runbook). |
+| **purge-queue-empty** | List and remove Sonarr/Radarr queue rows with zero/empty downloads (Code Mode; `load_skill` for full runbook). |

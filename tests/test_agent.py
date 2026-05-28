@@ -20,6 +20,12 @@ class TestSystemPrompt:
         assert "Mose" in prompt
         assert "2026-01-01" in prompt
 
+    def test_skill_authoring_rules_in_prompt(self):
+        prompt = _build_system_prompt([], None, "2026-01-01T00:00:00Z")
+        assert "workspace/skills" in prompt
+        assert "skills_path" in prompt
+        assert "write_file" in prompt
+
     def test_with_memories(self):
         memories = [
             MemoryResult(id=1, content="User likes Python", memory_type="fact",

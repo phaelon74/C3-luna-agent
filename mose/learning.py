@@ -142,6 +142,88 @@ def _valid_slug(slug: str) -> bool:
     return bool(re.match(r"^[a-z0-9]+(?:-[a-z0-9]+)*$", slug or ""))
 
 
+_SKILL_REQUEST_RE = re.compile(r"\b(?:create|write|add)\b.*?\bskill\b", re.IGNORECASE)
+_EXPLICIT_SKILL_SLUG_RE = re.compile(
+    r"\b(?:create|write|add)\b.*?\bskill\b.*?\b([a-z0-9]+(?:-[a-z0-9]+)*)\b",
+    re.IGNORECASE,
+)
+
+SKILL_DRAFT_SYSTEM_PROMPT = (
+    "Write a concise, high-quality SRE skill file in Markdown for the Mose agent. "
+    "Audience: a senior SRE on a Linux Docker host with integrated backends behind Code Mode.\n\n"
+    "Structure the body as:\n"
+    "  # <Title>\n\n"
+    "  ## When to use\n  - bullets\n\n"
+    "  ## Discovery\n  - Code Mode search/execute steps\n\n"
+    "  ## Steps\n  - numbered steps with TypeScript in fenced ```ts blocks\n\n"
+    "  ## Verification\n  - how to confirm success via Code Mode\n\n"
+    "  ## Caveats\n  - risks, rollback, approval gates\n\n"
+    "Rules:\n"
+    "  - Plex, Sonarr, Radarr, NZBGet, paper_db: ONLY "
+    "mcp-portal__portal_codemode_search and portal_codemode_execute. "
+    "Never curl, wget, or bash to reach those APIs. Never reference $SONARR_API_KEY etc.\n"
+    "  - bash is only for read-only checks on THIS host (systemctl, journalctl, local docker ps).\n"
+    "  - sre_execute is for state-changing commands on THIS host only.\n"
+    "  - Queue/download tasks: use sonarr_get_queue / radarr_get_queue and "
+    "sonarr_delete_queue_item / radarr_delete_queue_item — not find/ls on /media paths.\n"
+    "  - Match the style of existing skills/sonarr.md and skills/radarr.md.\n"
+    "  - Never include destructive steps without an explicit admin-approval gate note.\n"
+    "  - Do NOT include YAML frontmatter — the caller adds it.\n"
+    "  - Output ONLY the Markdown body."
+)
+
+
+def user_requests_skill_capture(user_message: str) -> bool:
+    """True when the user is asking to create/document a skill."""
+    return bool(_SKILL_REQUEST_RE.search(user_message or ""))
+
+
+def parse_explicit_skill_request(user_message: str) -> dict[str, str] | None:
+    """Extract slug from messages like 'create skill purge-queue-samples'."""
+    m = _EXPLICIT_SKILL_SLUG_RE.search(user_message or "")
+    if not m:
+        return None
+    slug = m.group(1).strip().lower()
+    if not _valid_slug(slug):
+        return None
+    title = slug.replace("-", " ").title()
+    return {
+        "slug": slug,
+        "title": title,
+        "description": f"Runbook for {title}",
+        "rationale": "Explicit operator request to capture this skill.",
+    }
+
+
+def append_mcp_tool_trace_entry(
+    trace: list[dict[str, str]],
+    tool_name: str,
+    arguments: str,
+    result: str,
+    *,
+    max_arg_chars: int = 800,
+    max_result_chars: int = 500,
+) -> None:
+    """Record one MCP tool call for skill proposal/build context."""
+    args_s = arguments if isinstance(arguments, str) else json.dumps(arguments, default=str)
+    trace.append({
+        "tool": tool_name,
+        "arguments": args_s[:max_arg_chars],
+        "result_preview": (result or "")[:max_result_chars],
+    })
+
+
+def format_tool_trace_for_prompt(tool_trace: list[dict[str, str]] | None) -> str:
+    if not tool_trace:
+        return ""
+    parts: list[str] = ["## Tool trace from source session (prefer these patterns)\n"]
+    for i, entry in enumerate(tool_trace, 1):
+        parts.append(f"### Call {i}: {entry.get('tool', '?')}")
+        parts.append(f"Arguments:\n{entry.get('arguments', '')}")
+        parts.append(f"Result preview:\n{entry.get('result_preview', '')}\n")
+    return "\n".join(parts)
+
+
 class SkillLearner:
     """Draft and review reusable SRE skills with strict human-in-the-loop control."""
 
@@ -190,6 +272,7 @@ class SkillLearner:
         *,
         memory: Any | None = None,
         recipient: str = "",
+        tool_trace: list[dict[str, str]] | None = None,
     ) -> Path | None:
         """Stage 1 — classify, persist the proposal, and notify the admin.
 
@@ -204,43 +287,60 @@ class SkillLearner:
             return None
         if had_tool_error:
             return None
-        if total_native_tool_calls < self._cfg.min_tools_used:
+
+        explicit = parse_explicit_skill_request(user_message)
+        wants_skill = user_requests_skill_capture(user_message)
+        trace = tool_trace or []
+        if (
+            total_native_tool_calls < self._cfg.min_tools_used
+            and not explicit
+            and not (wants_skill and trace)
+        ):
             return None
 
         self._ensure_dirs()
 
-        classify_prompt = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a skill scout for an SRE/DevOps agent. Decide whether the "
-                    "last exchange contains a REUSABLE runbook pattern worth capturing "
-                    "as a skill. Do NOT write the skill body — only classify.\n\n"
-                    "Reply with JSON only, no prose, no markdown fences.\n"
-                    "If reusable: "
-                    '{"propose": true, "slug": "kebab-case", "title": "Short title", '
-                    '"description": "One-line summary <= 140 chars", '
-                    '"rationale": "1-3 sentences on why this is reusable and when to use it"}\n'
-                    "Otherwise: {\"propose\": false, \"rationale\": \"why not\"}\n"
-                    "Slug must match [a-z0-9]+(-[a-z0-9]+)*."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"session_id={session_id}\n\n"
-                    f"User:\n{user_message}\n\n"
-                    f"Assistant:\n{assistant_reply}\n"
-                ),
-            },
-        ]
-
-        try:
-            response = await llm.chat(classify_prompt, temperature=0.2)
-            data = json.loads(_strip_code_fence(response.content or ""))
-        except Exception:
-            logger.exception("skill classification failed")
-            return None
+        if explicit:
+            data = {
+                "propose": True,
+                "slug": explicit["slug"],
+                "title": explicit["title"],
+                "description": explicit["description"],
+                "rationale": explicit["rationale"],
+            }
+            log_event(logger, "skill_propose_explicit_request", slug=explicit["slug"])
+        else:
+            classify_prompt = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a skill scout for an SRE/DevOps agent. Decide whether the "
+                        "last exchange contains a REUSABLE runbook pattern worth capturing "
+                        "as a skill. Do NOT write the skill body — only classify.\n\n"
+                        "Reply with JSON only, no prose, no markdown fences.\n"
+                        "If reusable: "
+                        '{"propose": true, "slug": "kebab-case", "title": "Short title", '
+                        '"description": "One-line summary <= 140 chars", '
+                        '"rationale": "1-3 sentences on why this is reusable and when to use it"}\n'
+                        "Otherwise: {\"propose\": false, \"rationale\": \"why not\"}\n"
+                        "Slug must match [a-z0-9]+(-[a-z0-9]+)*."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"session_id={session_id}\n\n"
+                        f"User:\n{user_message}\n\n"
+                        f"Assistant:\n{assistant_reply}\n"
+                    ),
+                },
+            ]
+            try:
+                response = await llm.chat(classify_prompt, temperature=0.2)
+                data = json.loads(_strip_code_fence(response.content or ""))
+            except Exception:
+                logger.exception("skill classification failed")
+                return None
 
         if not data.get("propose"):
             log_event(
@@ -281,6 +381,8 @@ class SkillLearner:
             "assistant_reply": assistant_reply,
             "created_at": time.time(),
         }
+        if trace:
+            proposal["tool_trace"] = trace
         proposal_path = self._pending / f"{slug}.proposal.json"
         try:
             proposal_path.write_text(json.dumps(proposal, indent=2), encoding="utf-8")
@@ -634,34 +736,19 @@ class SkillLearner:
         description = str(proposal.get("description", "")).strip()
         rationale = str(proposal.get("rationale", "")).strip()
 
+        trace_block = format_tool_trace_for_prompt(proposal.get("tool_trace"))
+        user_content = (
+            f"Slug: {slug}\nTitle: {title}\nDescription: {description}\n"
+            f"Rationale: {rationale}\n\n"
+            f"Source session:\nUser:\n{proposal.get('user_message', '')}\n\n"
+            f"Assistant:\n{proposal.get('assistant_reply', '')}\n"
+        )
+        if trace_block:
+            user_content += f"\n{trace_block}"
+
         draft_prompt = [
-            {
-                "role": "system",
-                "content": (
-                    "Write a concise, high-quality SRE skill file in Markdown. "
-                    "Audience: a senior SRE running against a Linux Docker host. "
-                    "Structure the body as:\n"
-                    "  # <Title>\n\n"
-                    "  ## When to use\n  - bullets\n\n"
-                    "  ## Steps\n  1. numbered steps with exact commands in fenced code blocks\n\n"
-                    "  ## Verification\n  - how to confirm success\n\n"
-                    "  ## Caveats\n  - risks, rollback, approval gates\n\n"
-                    "Rules:\n"
-                    "  - Never include destructive commands without an explicit approval gate note.\n"
-                    "  - Use the `sre_execute` tool for state-changing operations and `bash` for read-only.\n"
-                    "  - Do NOT include YAML frontmatter — the caller adds it.\n"
-                    "  - Output ONLY the Markdown body."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"Slug: {slug}\nTitle: {title}\nDescription: {description}\n"
-                    f"Rationale: {rationale}\n\n"
-                    f"Source session:\nUser:\n{proposal.get('user_message', '')}\n\n"
-                    f"Assistant:\n{proposal.get('assistant_reply', '')}\n"
-                ),
-            },
+            {"role": "system", "content": SKILL_DRAFT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
         ]
 
         try:

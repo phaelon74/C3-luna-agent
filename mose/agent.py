@@ -20,7 +20,11 @@ from mose.context_compress import (
     init_context_compress,
     max_input_tokens as compute_max_input_tokens,
 )
-from mose.learning import SkillLearner
+from mose.learning import (
+    SkillLearner,
+    append_mcp_tool_trace_entry,
+    user_requests_skill_capture,
+)
 from mose.llm import LLMClient
 from mose.memory import MemoryManager
 from mose.mcp_manager import MCPManager
@@ -103,6 +107,12 @@ Prefer this over delegate for coding work.
 - Collectors are TypeScript bodies that must ``console.log(JSON.stringify({{ metrics, snapshot }}))``.
 - Before writing or fixing Plex collectors, ``load_skill`` **codemode-collector-conventions** and **plex** (tracker section). Probe API shape first; do not assume MediaContainer for ``sessions_get_active``.
 - ``server_get_current_resources``: latest ``timestamp`` row from ``data[]`` only (values already 0–100%). ``sessions_get_active``: flat ``sessions`` + ``total_bitrate_kbps``; parse ``media_info.bitrate`` strings.
+
+### Creating / updating skills
+- Production skills live under **skills_path** (e.g. ``/app/skills``), loaded into your system prompt — **not** ``workspace/skills/``.
+- ``write_file`` only writes inside the workspace; it **cannot** install a production skill file.
+- When the user asks to create or document a skill: ``load_skill`` **sonarr**, **radarr**, and **_overview** as needed; reuse the **actual** ``portal_codemode_execute`` TypeScript from the task — never substitute ``bash``/``find``/``ls`` on download paths or ``curl`` to *arr APIs.
+- Durable install: the learning proposal flow (admin Signal approval) or the operator commits markdown into the repo ``skills/`` tree — do not claim a workspace copy is live.
 
 ## Guidelines
 - Act, don't ask. You have tools — use them. Install packages, run commands, create files, scan networks. \
@@ -457,6 +467,11 @@ class Agent:
         rounds = 0
         total_native_tool_calls = 0
         had_tool_error = False
+        mcp_tool_trace: list[dict[str, str]] = []
+        capture_trace = (
+            self.config.learning.enabled
+            and user_requests_skill_capture(text_for_memory)
+        )
         while response.has_tool_calls() and rounds < self.max_tool_rounds:
             rounds += 1
 
@@ -478,6 +493,11 @@ class Agent:
                 # Skill-learning heuristic: only *native* builtins count (not inlined MCP).
                 if is_native_tool(tc.name):
                     total_native_tool_calls += 1
+                    if (
+                        self.config.learning.enabled
+                        and total_native_tool_calls >= self.config.learning.min_tools_used
+                    ):
+                        capture_trace = True
 
                 if status_callback is not None:
                     try:
@@ -546,6 +566,10 @@ class Agent:
                             self.memory.record_skill_usage(sk, session_id, outcome)
                     except (json.JSONDecodeError, TypeError):
                         pass
+                if capture_trace and not is_native_tool(tc.name):
+                    append_mcp_tool_trace_entry(
+                        mcp_tool_trace, tc.name, tc.arguments, result,
+                    )
                 if self.tool_callback is not None:
                     self.tool_callback(tc.name, tc.arguments, result)
                 messages.append({
@@ -627,6 +651,7 @@ class Agent:
                     self.llm,
                     memory=self.memory,
                     recipient=self.config.signal.admin_group_id,
+                    tool_trace=mcp_tool_trace if mcp_tool_trace else None,
                 )
             except Exception:
                 logger.exception("Skill proposal failed")

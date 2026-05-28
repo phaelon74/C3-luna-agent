@@ -12,13 +12,16 @@ import pytest
 
 from mose.config import LearningConfig, MemoryConfig
 from mose.learning import (
+    SKILL_DRAFT_SYSTEM_PROMPT,
     SkillLearner,
+    format_tool_trace_for_prompt,
     handle_skill_decision,
     init_skill_decision_runtime,
     init_skill_promotion,
     init_skill_recovery_notice,
     init_skill_reminder,
     init_skill_review,
+    parse_explicit_skill_request,
 )
 from mose.llm import LLMResponse
 from mose.memory import MemoryManager
@@ -601,3 +604,77 @@ class TestReviewSkills:
         assert "Candidates for action: **1**" in text
         assert "`flaky`" in text
         assert "rewrite" in text
+
+
+class TestSkillDraftPrompt:
+    def test_draft_system_prompt_uses_codemode_not_curl(self):
+        assert "portal_codemode" in SKILL_DRAFT_SYSTEM_PROMPT
+        assert "sonarr_get_queue" in SKILL_DRAFT_SYSTEM_PROMPT
+        assert "curl" not in SKILL_DRAFT_SYSTEM_PROMPT.lower() or "never curl" in SKILL_DRAFT_SYSTEM_PROMPT.lower()
+
+    def test_parse_explicit_skill_request(self):
+        got = parse_explicit_skill_request("Please create skill purge-queue-samples for me")
+        assert got is not None
+        assert got["slug"] == "purge-queue-samples"
+
+    def test_format_tool_trace(self):
+        text = format_tool_trace_for_prompt([
+            {"tool": "mcp-portal__portal_codemode_execute", "arguments": "{}", "result_preview": "ok"},
+        ])
+        assert "portal_codemode_execute" in text
+
+
+class TestToolTraceInBuild:
+    async def test_build_approved_skill_includes_tool_trace(self, tmp_path):
+        learner = _make_learner(tmp_path)
+        proposal_path = tmp_path / "skills" / "pending" / "trace-skill.proposal.json"
+        proposal_path.parent.mkdir(parents=True, exist_ok=True)
+        proposal_path.write_text(json.dumps({
+            "slug": "trace-skill",
+            "title": "Trace",
+            "description": "d",
+            "rationale": "r",
+            "session_id": "s1",
+            "user_message": "create skill",
+            "assistant_reply": "done",
+            "tool_trace": [{
+                "tool": "mcp-portal__portal_codemode_execute",
+                "arguments": "code here",
+                "result_preview": "stdout",
+            }],
+        }), encoding="utf-8")
+
+        llm = MagicMock()
+        llm.chat = AsyncMock(return_value=LLMResponse(content="## Steps\n1. use codemode\n"))
+
+        await learner.build_approved_skill(proposal_path, llm)
+        assert llm.chat.called
+        user_msg = llm.chat.call_args[0][0][1]["content"]
+        assert "portal_codemode_execute" in user_msg
+        assert (tmp_path / "skills" / "trace-skill.md").exists()
+
+    async def test_explicit_skill_request_skips_classifier(self, tmp_path):
+        async def notify(*_args, **_kw):
+            pass
+
+        init_skill_promotion(notify)
+        learner = _make_learner(tmp_path)
+        memory = _make_memory(tmp_path)
+        llm = MagicMock()
+        llm.chat = AsyncMock()
+
+        path = await learner.maybe_propose_skill(
+            "s1",
+            "create skill purge-queue-empty now",
+            "I will document it",
+            total_native_tool_calls=0,
+            had_tool_error=False,
+            llm=llm,
+            memory=memory,
+            recipient="+1",
+        )
+        assert path is not None
+        llm.chat.assert_not_called()
+        proposal = json.loads(path.read_text(encoding="utf-8"))
+        assert proposal["slug"] == "purge-queue-empty"
+        memory.close()
