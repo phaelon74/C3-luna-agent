@@ -11,6 +11,8 @@ from typing import Any, Callable
 import openai
 
 from mose.config import Config, LearningConfig
+from mose.incoming_content import IncomingContent, incoming_content_to_surrogate
+from mose.llm_vision import VisionNotSupportedError, build_user_message_content
 from mose.context_compress import (
     compress_messages_if_needed,
     compress_text_if_needed,
@@ -364,7 +366,7 @@ class Agent:
 
     async def process(
         self,
-        message: str,
+        message: str | IncomingContent,
         session_id: str,
         status_callback: Callable[[str, str], Any] | None = None,
     ) -> str:
@@ -372,6 +374,8 @@ class Agent:
         with log_duration(logger, "agent_process", session_id=session_id):
             try:
                 return await self._process_inner(message, session_id, status_callback)
+            except VisionNotSupportedError as e:
+                return str(e)
             except openai.BadRequestError as e:
                 if _is_context_length_error(e):
                     log_event(logger, "context_overflow_fatal", session_id=session_id)
@@ -382,13 +386,24 @@ class Agent:
                     )
                 raise
 
-    async def _process_inner(self, message: str, session_id: str,
-                              status_callback: Callable[[str, str], Any] | None = None) -> str:
-        # 1. Save user message
-        self.memory.save_message(session_id, "user", message)
+    async def _process_inner(
+        self,
+        message: str | IncomingContent,
+        session_id: str,
+        status_callback: Callable[[str, str], Any] | None = None,
+    ) -> str:
+        if isinstance(message, IncomingContent):
+            incoming: IncomingContent | None = message
+            text_for_memory = incoming_content_to_surrogate(message)
+        else:
+            incoming = None
+            text_for_memory = message
+
+        # 1. Save user message (text surrogate only — no image base64 in SQLite)
+        self.memory.save_message(session_id, "user", text_for_memory)
 
         # 2. Retrieve relevant memories
-        memories = self.memory.search(message, top_k=self.config.memory.top_k)
+        memories = self.memory.search(text_for_memory, top_k=self.config.memory.top_k)
         summary = self.memory.get_session_summary(session_id)
 
         # 3. Build prompt
@@ -416,6 +431,13 @@ class Agent:
         # 5. Build message list
         messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
         messages.extend(recent)
+        if messages and messages[-1].get("role") == "user":
+            last = messages[-1].get("content")
+            if isinstance(last, str) and last == text_for_memory:
+                messages = messages[:-1]
+
+        user_content = build_user_message_content(incoming) if incoming else text_for_memory
+        messages.append({"role": "user", "content": user_content})
 
         input_budget = compute_max_input_tokens(
             self.config.llm.context_window, self.config.llm.max_tokens, tools,
@@ -427,9 +449,9 @@ class Agent:
             messages,
             llm=self.llm,
             max_input_tokens=input_budget,
-            query_context=message,
+            query_context=text_for_memory,
         )
-        response = await self._llm_chat(messages, tools, input_budget, message)
+        response = await self._llm_chat(messages, tools, input_budget, text_for_memory)
 
         # 7. Tool call loop
         rounds = 0
@@ -469,7 +491,7 @@ class Agent:
                     if is_native_tool(tc.name):
                         result = await call_native_tool(
                             tc.name, tc.arguments,
-                            context=message, llm=self.llm,
+                            context=text_for_memory, llm=self.llm,
                         )
                     else:
                         parsed = _coerce_tool_arguments(tc.arguments)
@@ -504,7 +526,7 @@ class Agent:
                 result = await compress_text_if_needed(
                     result,
                     llm=self.llm,
-                    query_context=message,
+                    query_context=text_for_memory,
                     max_output_tokens=tool_result_budget,
                     source=tc.name,
                 )
@@ -537,9 +559,9 @@ class Agent:
                 messages,
                 llm=self.llm,
                 max_input_tokens=input_budget,
-                query_context=message,
+                query_context=text_for_memory,
             )
-            response = await self._llm_chat(messages, tools, input_budget, message)
+            response = await self._llm_chat(messages, tools, input_budget, text_for_memory)
 
         if rounds >= self.max_tool_rounds:
             log_event(logger, "tool_loop_limit", session_id=session_id, rounds=rounds)
@@ -552,9 +574,9 @@ class Agent:
                 messages,
                 llm=self.llm,
                 max_input_tokens=input_budget,
-                query_context=message,
+                query_context=text_for_memory,
             )
-            response = await self._llm_chat(messages, None, input_budget, message)
+            response = await self._llm_chat(messages, None, input_budget, text_for_memory)
 
         # 8. Thinking retry — model produced only reasoning after tool use
         content = response.content
@@ -572,9 +594,9 @@ class Agent:
                 messages,
                 llm=self.llm,
                 max_input_tokens=input_budget,
-                query_context=message,
+                query_context=text_for_memory,
             )
-            response = await self._llm_chat(messages, None, input_budget, message)
+            response = await self._llm_chat(messages, None, input_budget, text_for_memory)
             content = response.content
 
         content = content or "(no response)"
@@ -598,7 +620,7 @@ class Agent:
             try:
                 await self._skill_learner.maybe_propose_skill(
                     session_id,
-                    message,
+                    text_for_memory,
                     content,
                     total_native_tool_calls,
                     had_tool_error,

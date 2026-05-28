@@ -41,6 +41,8 @@ class LLMConfig:
     # TabbyAPI and many OpenAI-compatible servers require Bearer auth; empty = no key (local vLLM).
     api_key: str = ""
     provider: str = "openai_compat"  # openai_compat | tabby | vllm | bedrock
+    vision_enabled: bool = True
+    vision_tokens_per_image: int = 1536
 
 
 @dataclass
@@ -72,6 +74,20 @@ class SignalConfig:
     admin_group_id: str = ""
     # Seconds to wait for a human response on a skill proposal (12 hours).
     proposal_timeout_seconds: int = 43200
+    max_attachment_bytes: int = 10_485_760
+    max_images_per_message: int = 4
+    allowed_text_suffixes: list[str] = field(
+        default_factory=lambda: [".txt", ".log", ".json", ".md"],
+    )
+    allowed_image_mime_types: list[str] = field(
+        default_factory=lambda: [
+            "image/jpeg",
+            "image/jpg",
+            "image/png",
+            "image/webp",
+            "image/gif",
+        ],
+    )
 
 
 def signal_runtime_ready(signal: SignalConfig) -> bool:
@@ -288,6 +304,14 @@ def load_config(config_path: Path | None = None) -> Config:
         cfg.llm.api_key = api_key
     if provider := os.environ.get("LLM_PROVIDER"):
         cfg.llm.provider = provider
+    if (ve := _env_optional_bool("LLM_VISION_ENABLED")) is not None:
+        cfg.llm.vision_enabled = ve
+    if (vt := os.environ.get("LLM_VISION_TOKENS_PER_IMAGE")) is not None and str(vt).strip():
+        cfg.llm.vision_tokens_per_image = int(vt)
+    if (smb := os.environ.get("SIGNAL_MAX_ATTACHMENT_BYTES")) is not None and str(smb).strip():
+        cfg.signal.max_attachment_bytes = int(smb)
+    if (sim := os.environ.get("SIGNAL_MAX_IMAGES_PER_MESSAGE")) is not None and str(sim).strip():
+        cfg.signal.max_images_per_message = int(sim)
     if (omit_temp := _env_optional_bool("LLM_OMIT_TEMPERATURE")) is not None:
         cfg.llm.omit_temperature = omit_temp
 

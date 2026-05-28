@@ -29,6 +29,7 @@ Use concise structured text (bullets or short sections are fine)."""
 _config: ContextCompressConfig | None = None
 _llm_context_window: int = 98304
 _llm_max_tokens: int = 16384
+_vision_tokens_per_image: int = 1536
 
 
 class LLMExtractor(Protocol):
@@ -59,10 +60,11 @@ def persist_output(raw: str, source: str, root: Path) -> Path:
 
 def init_context_compress(config: Config) -> None:
     """Register compression settings from loaded config (call once at startup)."""
-    global _config, _llm_context_window, _llm_max_tokens
+    global _config, _llm_context_window, _llm_max_tokens, _vision_tokens_per_image
     _config = config.context_compress
     _llm_context_window = config.llm.context_window
     _llm_max_tokens = config.llm.max_tokens
+    _vision_tokens_per_image = config.llm.vision_tokens_per_image
 
 
 def _cfg() -> ContextCompressConfig:
@@ -84,17 +86,30 @@ def estimate_text_tokens(text: str, *, role: str = "tool") -> int:
     return int(len(text) / divisor)
 
 
+def _estimate_content_tokens(content: Any, role: str | None) -> int:
+    if isinstance(content, list):
+        tokens = 0
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "text":
+                tokens += int(len(str(part.get("text") or "")) / DEFAULT_CHARS_PER_TOKEN)
+            elif part.get("type") == "image_url":
+                tokens += _vision_tokens_per_image
+        return tokens
+    divisor = _chars_per_token_for_role(role)
+    return int(len(str(content or "")) / divisor)
+
+
 def estimate_tokens(messages: list[dict]) -> int:
     """Rough token estimate from message list."""
     tokens = 0
     for m in messages:
-        divisor = _chars_per_token_for_role(m.get("role"))
-        chars = len(str(m.get("content") or ""))
+        tokens += _estimate_content_tokens(m.get("content"), m.get("role"))
         for tc in m.get("tool_calls", []):
             fn = tc.get("function")
             args = fn.get("arguments", "") if isinstance(fn, dict) else str(tc)
-            chars += len(str(args))
-        tokens += int(chars / divisor)
+            tokens += int(len(str(args)) / DEFAULT_CHARS_PER_TOKEN)
     return tokens
 
 
@@ -352,8 +367,11 @@ async def _compress_message_content(
     source: str,
     root: Path | None,
 ) -> dict:
+    content = msg.get("content")
+    if isinstance(content, list):
+        return msg
     role = msg.get("role") or "user"
-    content = str(msg.get("content") or "")
+    content = str(content or "")
     if not content:
         return msg
     compressed = await compress_text_if_needed(

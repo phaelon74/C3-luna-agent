@@ -504,6 +504,10 @@ def _format_status(tool_name: str, arguments: str) -> str:
         return f"Reading {args.get('path', arguments)}"
     if tool_name == "write_file":
         return f"Writing {args.get('path', arguments)}"
+    if tool_name == "signal_attachment":
+        return f"Downloading attachment: {arguments[:120]}"
+    if tool_name == "signal_compress":
+        return f"Compressing large file: {arguments[:120]}"
     if tool_name in ("delegate", "code_task"):
         return f"Working: {args.get('task', arguments)}"
     if tool_name == "use_tool":
@@ -519,25 +523,38 @@ def _format_status(tool_name: str, arguments: str) -> str:
     return f"{tool_name}..."
 
 
-def _extract_message_from_envelope(envelope: dict) -> tuple[str | None, str | None, str | None]:
-    """Extract (source_number, message_text, group_id) from a receive envelope."""
+def parse_signal_envelope(
+    envelope: dict,
+) -> tuple[str, str, str | None, list[dict]] | None:
+    """Extract source, caption, group_id, and attachment metadata from a receive envelope."""
     source = envelope.get("source") or envelope.get("sourceNumber") or ""
     if not source:
-        return None, None, None
+        return None
 
-    # dataMessage: direct incoming message
-    data_msg = envelope.get("dataMessage")
-    if data_msg and isinstance(data_msg, dict):
-        msg = data_msg.get("message") or ""
-        group_info = data_msg.get("groupInfo") or {}
-        group_id = group_info.get("groupId") if isinstance(group_info, dict) else None
-        return source, (msg if isinstance(msg, str) else ""), group_id
-
-    # syncMessage: our own sent messages synced from primary - ignore
     if envelope.get("syncMessage"):
-        return None, None, None
+        return None
 
-    return source, None, None
+    data_msg = envelope.get("dataMessage")
+    if not data_msg or not isinstance(data_msg, dict):
+        return None
+
+    msg = data_msg.get("message") or ""
+    caption = msg if isinstance(msg, str) else ""
+    group_info = data_msg.get("groupInfo") or {}
+    group_id = group_info.get("groupId") if isinstance(group_info, dict) else None
+    attachments = data_msg.get("attachments") or []
+    if not isinstance(attachments, list):
+        attachments = []
+    return source, caption, group_id, attachments
+
+
+def _extract_message_from_envelope(envelope: dict) -> tuple[str | None, str | None, str | None]:
+    """Extract (source_number, message_text, group_id) from a receive envelope."""
+    parsed = parse_signal_envelope(envelope)
+    if parsed is None:
+        return None, None, None
+    source, caption, group_id, _attachments = parsed
+    return source, caption, group_id
 
 
 class MoseSignalBot:
@@ -591,6 +608,21 @@ class MoseSignalBot:
         finally:
             self._rpc_pending.pop(req_id, None)
 
+    async def get_attachment(
+        self,
+        attachment_id: str,
+        *,
+        group_id: str,
+        source: str,
+    ) -> dict[str, Any]:
+        """Download attachment bytes via signal-cli getAttachment (result includes base64)."""
+        del source  # group messages use groupId only
+        params: dict[str, Any] = {"id": attachment_id, "groupId": group_id}
+        account = (self.config.phone_number or "").strip()
+        if account:
+            params["account"] = account
+        return await self._send_rpc("getAttachment", params)
+
     async def _send_message(self, group_id: str, text: str) -> None:
         """Send a message to a Signal group via JSON-RPC (groupId only)."""
         gid = (group_id or "").strip()
@@ -640,13 +672,14 @@ class MoseSignalBot:
 
     async def _handle_message(self, envelope: dict) -> None:
         """Process an incoming message envelope."""
-        source, message_text, group_id_raw = _extract_message_from_envelope(envelope)
-        if not source or message_text is None:
+        parsed = parse_signal_envelope(envelope)
+        if parsed is None:
             return
+        source, message_text, group_id_raw, attachments_meta = parsed
 
-        # Ignore empty messages
         content = message_text.strip() if isinstance(message_text, str) else ""
-        if not content:
+        has_attachments = bool(attachments_meta)
+        if not content and not has_attachments:
             return
 
         eng = (self.config.engagement_group_id or "").strip()
@@ -700,11 +733,51 @@ class MoseSignalBot:
             except Exception:
                 pass
 
+        from mose.incoming_content import IncomingContent
+        from mose.llm_vision import VisionNotSupportedError, provider_supports_vision, vision_not_supported_message
+        from mose.signal_attachments import resolve_signal_attachments
+
+        user_input: str | IncomingContent = content
+        if has_attachments:
+            session_key = hashlib.sha256(session_id.encode()).hexdigest()[:16]
+            incoming = await resolve_signal_attachments(
+                self,
+                envelope=envelope,
+                source=source,
+                group_id=group_id,
+                caption=content,
+                llm=self.agent.llm,
+                config=self.agent.config,
+                session_key=session_key,
+                status_callback=_send_status,
+            )
+            if incoming.is_empty():
+                if incoming.skipped_notes:
+                    await self._send_message(group_id, "\n".join(incoming.skipped_notes))
+                return
+            if incoming.images and not provider_supports_vision(
+                self.agent.config.llm.provider, self.agent.config.llm,
+            ):
+                await self._send_message(
+                    group_id,
+                    vision_not_supported_message(
+                        self.agent.config.llm.provider, self.agent.config.llm,
+                    ),
+                )
+                return
+            user_input = incoming
+
         try:
-            response = await self.agent.process(content, session_id, status_callback=_send_status)
+            response = await self.agent.process(user_input, session_id, status_callback=_send_status)
+        except VisionNotSupportedError as e:
+            response = str(e)
         except Exception:
             logger.exception("Agent processing failed")
             response = "Sorry, I encountered an error processing your message."
+
+        if isinstance(user_input, IncomingContent) and user_input.skipped_notes:
+            prefix = "\n".join(user_input.skipped_notes) + "\n\n"
+            response = prefix + response
 
         chunks = _split_message(response)
         for chunk in chunks:

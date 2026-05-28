@@ -76,3 +76,16 @@ class TestBudget:
     def test_max_input_tokens_reserves_margin(self, compress_config):
         budget = max_input_tokens(262144, 16384, None)
         assert budget < 262144 - 16384
+
+    def test_estimate_tokens_multimodal_content(self, compress_config):
+        from mose.context_compress import estimate_tokens
+
+        msgs = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hi"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,ab"}},
+            ],
+        }]
+        plain = [{"role": "user", "content": "hi"}]
+        assert estimate_tokens(msgs) > estimate_tokens(plain)

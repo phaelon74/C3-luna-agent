@@ -15,7 +15,9 @@ from mose.signal_bot import (
     _handle_skill_approval_reply,
     _session_id_for_signal_group,
     _split_message,
+    parse_signal_envelope,
 )
+from mose.incoming_content import IncomingContent
 
 
 class TestSplitMessage:
@@ -128,6 +130,22 @@ class TestExtractMessageFromEnvelope:
         assert source is None
         assert msg is None
 
+    def test_parse_with_attachments(self):
+        envelope = {
+            "source": "+1234567890",
+            "dataMessage": {
+                "message": "",
+                "attachments": [{"id": "att1", "contentType": "image/png", "fileName": "x.png"}],
+                "groupInfo": {"groupId": "eng-gid"},
+            },
+        }
+        parsed = parse_signal_envelope(envelope)
+        assert parsed is not None
+        source, caption, gid, attachments = parsed
+        assert source == "+1234567890"
+        assert caption == ""
+        assert len(attachments) == 1
+
 
 def _signal_config(*, eng: str = "eng-gid", adm: str = "adm-gid") -> "SignalConfig":
     from mose.config import SignalConfig
@@ -174,6 +192,40 @@ class TestHandleMessage:
         calls = mock_send.call_args_list
         assert any("Hello back" in (c[0][1] if c[0] else "") for c in calls)
         assert all(c[0][0] == "eng-gid" for c in calls if c[0])
+
+    @pytest.mark.asyncio
+    async def test_image_only_message_not_dropped(self, tmp_path):
+        from mose.config import Config
+
+        agent = AsyncMock()
+        agent.config = Config()
+        agent.config.root_dir = tmp_path
+        agent.config.llm.provider = "vllm"
+        agent.config.llm.vision_enabled = True
+        agent.process.return_value = "I see an image."
+
+        mock_send = AsyncMock()
+        config = _signal_config()
+        bot = MoseSignalBot(agent, config)
+        bot._send_message = mock_send
+        bot.get_attachment = AsyncMock(
+            return_value={"dataBase64": "iVBORw0KGgo="},
+        )
+
+        envelope = {
+            "source": "+1234567890",
+            "dataMessage": {
+                "message": "",
+                "attachments": [{"id": "a1", "contentType": "image/png", "fileName": "x.png"}],
+                "groupInfo": {"groupId": "eng-gid"},
+            },
+        }
+        await bot._handle_message(envelope)
+
+        agent.process.assert_called_once()
+        arg = agent.process.call_args[0][0]
+        assert isinstance(arg, IncomingContent)
+        assert len(arg.images) == 1
 
     @pytest.mark.asyncio
     async def test_ignores_unknown_group(self):

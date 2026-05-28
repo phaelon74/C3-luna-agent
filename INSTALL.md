@@ -736,6 +736,30 @@ signal-cli -a +15551234567 listGroups --json
 
 Copy the `id` field for each group into `.env`.
 
+### E.4a Signal attachments (images and text files)
+
+Mose accepts **inbound** attachments in the engagement and admin groups (replies
+remain text-only):
+
+| Type | Formats | Handling |
+|------|---------|----------|
+| Images | JPEG, PNG, WebP, GIF | Base64 `data:` URLs in OpenAI multimodal `image_url` parts |
+| Text files | `.txt`, `.log`, `.json`, `.md` | UTF-8 decode; large files run through chunk-and-summarize compression |
+
+**Vision backend (`LLM_PROVIDER`)**
+
+| Provider | Requirements |
+|----------|----------------|
+| `vllm` | Vision-language model (e.g. Qwen3-VL); start server with e.g. `--limit-mm-per-prompt '{"image":4}'` |
+| `tabby` | Load model with `vision: true` in Tabby config; confirm `/v1/models` shows `use_vision: true` |
+| `openai_compat` | Backend must accept OpenAI-style multimodal chat completions |
+
+Env: `LLM_VISION_ENABLED=true` (default), `LLM_VISION_TOKENS_PER_IMAGE` (budget heuristic).
+Optional: `SIGNAL_MAX_ATTACHMENT_BYTES` (default 10 MiB), `SIGNAL_MAX_IMAGES_PER_MESSAGE` (default 4).
+
+The signal-cli daemon must receive attachments (do not run JSON-RPC mode with
+`--ignore-attachments`).
+
 ### E.5 Wire the agent
 
 Set all three variables in `.env`. If `SIGNAL_PHONE` is set but either group id

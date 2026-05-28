@@ -12,6 +12,14 @@ from typing import Any
 import openai
 
 from mose.config import LLMConfig
+from mose.llm_vision import (
+    VisionNotSupportedError,
+    check_vision_allowed,
+    count_vision_images,
+    message_has_vision,
+    prepare_messages_for_provider,
+    vision_error_hint,
+)
 from mose.observe import get_logger, log_event, log_duration
 
 logger = get_logger("llm")
@@ -89,10 +97,31 @@ class LLMClient:
 
         tool_names = [t["function"]["name"] for t in (tools or [])]
 
+        try:
+            check_vision_allowed(messages, self.config)
+            if message_has_vision(messages):
+                messages = prepare_messages_for_provider(
+                    messages, self.config.provider, self.config,
+                )
+                log_event(
+                    logger,
+                    "llm_vision_request",
+                    provider=self.config.provider,
+                    image_count=count_vision_images(messages),
+                )
+        except VisionNotSupportedError:
+            raise
+
+        kwargs["messages"] = messages
+
         with log_duration(logger, "llm_call", model=self.config.model, tools_available=len(tool_names)):
             try:
                 raw = await self.client.chat.completions.create(**kwargs)
-            except Exception:
+            except Exception as e:
+                hint = vision_error_hint(self.config.provider, e)
+                if hint and message_has_vision(messages):
+                    logger.exception("LLM call failed (vision)", extra={"hint": hint})
+                    raise VisionNotSupportedError(hint) from e
                 logger.exception("LLM call failed")
                 raise
 
@@ -227,7 +256,11 @@ def _openai_messages_to_bedrock(
             continue
 
         # user messages
-        bedrock_messages.append({"role": "user", "content": [{"text": msg["content"]}]})
+        raw_content = msg.get("content")
+        if isinstance(raw_content, list):
+            bedrock_messages.append({"role": "user", "content": raw_content})
+        else:
+            bedrock_messages.append({"role": "user", "content": [{"text": raw_content or ""}]})
 
     return system_prompts, bedrock_messages
 
@@ -302,6 +335,15 @@ class BedrockClient:
         temperature: float | None = None,
     ) -> LLMResponse:
         """Send a chat request via Bedrock Converse API."""
+        try:
+            check_vision_allowed(messages, self.config)
+            if message_has_vision(messages):
+                messages = prepare_messages_for_provider(
+                    messages, "bedrock", self.config,
+                )
+        except VisionNotSupportedError:
+            raise
+
         system_prompts, bedrock_messages = _openai_messages_to_bedrock(messages)
 
         kwargs: dict[str, Any] = {
