@@ -905,3 +905,17 @@ class TestCodeTask:
         messages = call_args[0][0]
         system_msg = messages[0]["content"]
         assert "Python 3.12" in system_msg
+
+
+def test_verify_tool_result_radarr_duplicate_hint() -> None:
+    raw = '{"success": false, "error": "Radarr: 400 movie already exists"}'
+    out = verify_tool_result("mcp-portal__portal_codemode_execute", raw)
+    assert "radarr_get_movie" in out
+    assert "[NOTE:" in out
+
+
+def test_verify_tool_result_already_exists_hint() -> None:
+    raw = "HTTP error: movie already exists in database"
+    out = verify_tool_result("use_tool", raw)
+    assert "tmdbId" in out
+    assert "[NOTE:" in out

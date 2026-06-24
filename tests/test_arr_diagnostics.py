@@ -69,6 +69,38 @@ def test_series_lookup_passes_term_param() -> None:
     assert client.last_params == {"term": "Criminal Record"}
 
 
+def test_movie_lookup_requires_term() -> None:
+    import json as _json
+
+    from arr_diagnostics.radarr_mcp import _get_movie_lookup
+
+    class _C:
+        def get_json(self, *_a: object, **_k: object) -> object:
+            raise AssertionError("should not GET without term")
+
+    out = _get_movie_lookup(_C(), "   \t")  # type: ignore[arg-type]
+    assert _json.loads(out)["error"] == "term_required"
+
+
+def test_movie_lookup_passes_term_param() -> None:
+    import json as _json
+
+    from arr_diagnostics.radarr_mcp import _get_movie_lookup
+
+    class _C:
+        def __init__(self) -> None:
+            self.last_params: dict[str, object] | None = None
+
+        def get_json(self, path: str, params: dict[str, object] | None = None) -> object:
+            self.last_params = params or {}
+            return [{"title": "The Sheep Detectives", "tmdbId": 1301421}]
+
+    client = _C()
+    out = _get_movie_lookup(client, "  Sheep Detectives  ")  # type: ignore[arg-type]
+    assert _json.loads(out)[0]["tmdbId"] == 1301421
+    assert client.last_params == {"term": "Sheep Detectives"}
+
+
 def test_post_episode_search_posts_episode_ids() -> None:
     import json as _json
 

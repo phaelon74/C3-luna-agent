@@ -56,6 +56,7 @@ def test_sonarr_diagnostics(bare: str, expected: str) -> None:
     "bare,expected",
     [
         ("radarr_get_movie", "read"),
+        ("radarr_get_movie_lookup", "read"),
         ("radarr_delete_queue_item", "write"),
         ("radarr_command_RssSync", "write"),
         ("radarr_post_indexer_test", "write"),

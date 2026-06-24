@@ -54,6 +54,17 @@ def radarr_queue_import_execute(
     return radarr_manual_import_commit(c, body)
 
 
+def _get_movie_lookup(client: ArrClient, term: str) -> str:
+    """GET ``/movie/lookup`` with ``term`` (whitespace-stripped)."""
+    t = term.strip()
+    if not t:
+        return json.dumps({
+            "error": "term_required",
+            "detail": "Pass a non-empty search string (movie title).",
+        })
+    return json_response(client.get_json("/movie/lookup", {"term": t}))
+
+
 def build_radarr_app(c: ArrClient) -> FastMCP:
     mcp = FastMCP("radarr-diagnostics")
     # See sonarr_mcp.build_sonarr_app: wrap every tool so API errors return JSON
@@ -215,7 +226,13 @@ def build_radarr_app(c: ArrClient) -> FastMCP:
         excludeLocalCovers: bool | None = None,
         languageId: int | None = None,
     ) -> str:
-        """GET /movie — warning: empty query returns full library (may be slow/large)."""
+        """GET /movie — your Radarr library.
+
+        With ``tmdbId``: fast server-side library lookup (preferred).
+        With no params: full library dump (slow on 20k+ movies; avoid for single-title checks).
+        For a single Radarr internal id use ``radarr_get_movie_by_id``.
+        For title-only metadata (TMDB) use ``radarr_get_movie_lookup``, then re-check library by ``tmdbId``.
+        """
         params: dict[str, Any] = {}
         if tmdbId is not None:
             params["tmdbId"] = tmdbId
@@ -224,6 +241,15 @@ def build_radarr_app(c: ArrClient) -> FastMCP:
         if languageId is not None:
             params["languageId"] = languageId
         return json_response(c.get_json("/movie", params or None))
+
+    @tool()
+    def radarr_get_movie_lookup(term: str) -> str:
+        """GET /movie/lookup — metadata search by title (TMDB; not your library list).
+
+        Use to resolve a movie title to ``tmdbId`` / canonical title, then match to a library
+        entry from ``radarr_get_movie`` with ``tmdbId`` or ``radarr_get_movie_by_id``.
+        """
+        return _get_movie_lookup(c, term)
 
     @tool()
     def radarr_get_movie_by_id(id: int) -> str:

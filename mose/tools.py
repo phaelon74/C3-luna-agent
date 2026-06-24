@@ -43,6 +43,16 @@ _ERROR_PATTERNS: list[tuple[str, str]] = [
     ("name or service not known", "DNS resolution failed — check the hostname."),
     ("disk quota exceeded", "Out of disk space."),
     ("connection timed out", "Network timeout — host may be unreachable."),
+    (
+        "already exists",
+        "Item may already be in Radarr/Sonarr. Re-check the library by tmdbId/tvdbId "
+        "(radarr_get_movie / sonarr_get_series) before concluding it is missing.",
+    ),
+    (
+        "movie already",
+        "Movie may already be in Radarr. Use radarr_get_movie({ tmdbId }) to confirm "
+        "library membership; Missing status means no file yet, not absent from library.",
+    ),
 ]
 
 
@@ -68,6 +78,17 @@ def verify_tool_result(tool_name: str, result: str) -> str:
     for pattern, hint in _ERROR_PATTERNS:
         if pattern in result_lower:
             return result + f"\n[NOTE: {hint}]"
+
+    # Plex-stack-automation returns Radarr/Sonarr HTTP errors as JSON, not log lines.
+    if (
+        '"success": false' in result_lower
+        and "400" in result_lower
+        and "radarr" in result_lower
+    ):
+        return result + (
+            "\n[NOTE: Radarr returned 400 — the movie may already be in your library. "
+            "Use radarr_get_movie({ tmdbId }) to confirm before concluding it is missing.]"
+        )
 
     return result
 

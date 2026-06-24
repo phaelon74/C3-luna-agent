@@ -133,6 +133,7 @@ _RADARR_DIAG_READS: frozenset[str] = frozenset({
     "radarr_get_manual_import",
     "radarr_get_history",
     "radarr_get_movie",
+    "radarr_get_movie_lookup",
     "radarr_get_movie_by_id",
     "radarr_get_movie_files",
     "radarr_get_movie_folder",
