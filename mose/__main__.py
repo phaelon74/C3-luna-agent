@@ -41,6 +41,16 @@ from mose.trackers import (
     init_tracker_alert_callback,
 )
 from mose.tracker_decision import handle_tracker_decision, init_tracker_decision_runtime
+from mose.task_decision import (
+    format_task_proposal_message,
+    handle_task_decision,
+    init_task_decision_runtime,
+    init_task_propose_callback,
+)
+from mose.task_scheduler import (
+    init_task_delivery_callback,
+    init_task_failure_callback,
+)
 
 
 async def _maybe_start_portal_approval_bridge(config) -> Any:
@@ -67,6 +77,34 @@ async def _cli_tracker_propose_callback(slug: str, description: str, expires_at:
 async def _cli_tracker_alert(tracker: Any, message: str) -> None:
     slug = getattr(tracker, "slug", "tracker")
     print(f"\n[tracker alert:{slug}]\n{message}\n")
+
+
+async def _cli_task_propose_callback(
+    slug: str, description: str, expires_at: float, payload: dict[str, Any]
+) -> None:
+    from datetime import datetime, timezone
+
+    from mose.config import load_config
+
+    cfg = load_config()
+    exp = datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(timespec="minutes")
+    body = format_task_proposal_message(payload, timezone=cfg.scheduler.timezone)
+    print(
+        f"\n[scheduled task proposal] {slug}\n"
+        f"{body}\n"
+        f"  Expires: {exp} UTC\n"
+        f"  Decide: python -m mose --decide {slug} y|n\n"
+    )
+
+
+async def _cli_task_delivery(task: Any, recipient: str, body: str) -> None:
+    slug = getattr(task, "slug", "task")
+    print(f"\n[scheduled task:{slug} -> {recipient}]\n{body}\n")
+
+
+async def _cli_task_failure(task: Any, message: str) -> None:
+    slug = getattr(task, "slug", "task")
+    print(f"\n[scheduled task FAILURE:{slug}]\n{message}\n")
 
 
 async def _cli_skill_propose_callback(
@@ -487,6 +525,17 @@ async def _run_decide_once(config, slug: str, decision: str) -> int:
         return 0 if applied else 1
 
     row = memory.get_pending_approval(slug)
+    if row is not None and row.kind in ("scheduled_task_proposal", "scheduled_task_deletion"):
+        init_task_decision_runtime(
+            memory=memory,
+            get_scheduler=lambda: None,
+            timezone=config.scheduler.timezone,
+        )
+        applied = await handle_task_decision(slug, approved=(action == "approve"))
+        memory.close()
+        print(f"{slug}: {'applied' if applied else 'noop (already decided, duplicate, or unknown)'}")
+        return 0 if applied else 1
+
     if row is not None and row.kind in ("tracker_proposal", "tracker_deletion"):
         init_tracker_decision_runtime(memory=memory, get_scheduler=lambda: None)
         applied = await handle_tracker_decision(slug, approved=(action == "approve"))
@@ -640,6 +689,9 @@ async def main() -> None:
                 _signal_skill_propose_callback,
                 _signal_skill_recovery_notice,
                 _signal_skill_review_notify,
+                _signal_task_delivery,
+                _signal_task_failure,
+                _signal_task_propose_callback,
                 _signal_tracker_alert,
                 _signal_tracker_propose_callback,
             )
@@ -649,6 +701,9 @@ async def main() -> None:
             init_skill_review(_signal_skill_review_notify)
             init_tracker_propose_callback(_signal_tracker_propose_callback)
             init_tracker_alert_callback(_signal_tracker_alert)
+            init_task_propose_callback(_signal_task_propose_callback)
+            init_task_delivery_callback(_signal_task_delivery)
+            init_task_failure_callback(_signal_task_failure)
             init_approval(_signal_approval_callback)
             approval_bridge_handle = await _maybe_start_portal_approval_bridge(config)
             agent = Agent(config, llm, memory, mcp)
@@ -656,6 +711,7 @@ async def main() -> None:
             agent.start_skill_review_loop()
             agent.start_trackers_loop()
             agent.start_tracker_compaction_loop()
+            agent.start_task_scheduler_loop()
             bot = MoseSignalBot(agent, config.signal)
 
             async def _signal_startup_recovery() -> None:
@@ -676,6 +732,7 @@ async def main() -> None:
                 await agent.stop_skill_review_loop()
                 await agent.stop_tracker_compaction_loop()
                 await agent.stop_trackers_loop()
+                await agent.stop_task_scheduler_loop()
                 await bot.close()
         elif config.discord.token:
             from mose.discord_bot import (
@@ -691,6 +748,9 @@ async def main() -> None:
             init_skill_review(None)
             init_tracker_propose_callback(None)
             init_tracker_alert_callback(_discord_tracker_alert)
+            init_task_propose_callback(None)
+            init_task_delivery_callback(_cli_task_delivery)
+            init_task_failure_callback(_cli_task_failure)
             init_approval(_discord_approval_callback)
             approval_bridge_handle = await _maybe_start_portal_approval_bridge(config)
             agent = Agent(config, llm, memory, mcp)
@@ -701,6 +761,7 @@ async def main() -> None:
             agent.start_skill_review_loop()
             agent.start_trackers_loop()
             agent.start_tracker_compaction_loop()
+            agent.start_task_scheduler_loop()
             bot = MoseDiscordBot(agent)
             log_event(logger, "starting_discord_bot")
             try:
@@ -711,6 +772,7 @@ async def main() -> None:
                 await agent.stop_skill_review_loop()
                 await agent.stop_tracker_compaction_loop()
                 await agent.stop_trackers_loop()
+                await agent.stop_task_scheduler_loop()
                 await bot.close()
         else:
             init_skill_promotion(_cli_skill_propose_callback)
@@ -719,6 +781,9 @@ async def main() -> None:
             init_skill_review(_cli_skill_review_notify)
             init_tracker_propose_callback(_cli_tracker_propose_callback)
             init_tracker_alert_callback(_cli_tracker_alert)
+            init_task_propose_callback(_cli_task_propose_callback)
+            init_task_delivery_callback(_cli_task_delivery)
+            init_task_failure_callback(_cli_task_failure)
             init_approval(_cli_approval_callback)
             approval_bridge_handle = await _maybe_start_portal_approval_bridge(config)
             log_event(logger, "cli_mode")
@@ -737,12 +802,14 @@ async def main() -> None:
             agent.start_skill_review_loop()
             agent.start_trackers_loop()
             agent.start_tracker_compaction_loop()
+            agent.start_task_scheduler_loop()
             try:
                 await _run_cli(agent)
             finally:
                 await agent.stop_skill_review_loop()
                 await agent.stop_tracker_compaction_loop()
                 await agent.stop_trackers_loop()
+                await agent.stop_task_scheduler_loop()
     finally:
         from mose.approval_bridge import stop_approval_bridge
 

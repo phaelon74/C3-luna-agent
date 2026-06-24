@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,21 +27,45 @@ from mose.learning import (
     user_requests_skill_capture,
 )
 from mose.llm import LLMClient
-from mose.memory import MemoryManager
+from mose.memory import MemoryManager, ScheduledTaskRow
 from mose.mcp_manager import MCPManager
 from mose.observe import get_logger, log_event, log_duration
+from mose.task_decision import (
+    format_task_recovery_message,
+    init_task_decision_runtime,
+)
+from mose.task_scheduler import TaskScheduler
 from mose.tracker_decision import format_tracker_recovery_message, init_tracker_decision_runtime
 from mose.trackers import TrackerScheduler
 from mose.tools import (
     NATIVE_TOOLS,
     call_native_tool,
+    enter_scheduled_execution,
     execute_mcp_tool,
+    exit_scheduled_execution,
+    init_scheduled_task_tool_context,
     init_tracker_tool_context,
     is_native_tool,
     verify_tool_result,
 )
 
 logger = get_logger("agent")
+
+_process_overrides: ContextVar[dict[str, Any] | None] = ContextVar(
+    "process_overrides", default=None
+)
+
+
+def enter_process_overrides(**kwargs: Any) -> Token:
+    return _process_overrides.set(dict(kwargs))
+
+
+def exit_process_overrides(token: Token) -> None:
+    _process_overrides.reset(token)
+
+
+def _get_process_overrides() -> dict[str, Any]:
+    return _process_overrides.get() or {}
 
 
 def _is_context_length_error(exc: BaseException) -> bool:
@@ -116,6 +141,13 @@ Prefer this over delegate for coding work.
 - When the user asks to create or document a skill: ``load_skill`` **sonarr**, **radarr**, and **_overview** as needed; reuse the **actual** ``portal_codemode_execute`` TypeScript from the task — never substitute ``bash``/``find``/``ls`` on download paths or ``curl`` to *arr APIs.
 - Durable install: the learning proposal flow (admin Signal approval) or the operator commits markdown into the repo ``skills/`` tree — do not claim a workspace copy is live.
 
+### Scheduled Tasks (calendar agent runs)
+- Tools: ``scheduled_task_propose``, ``scheduled_task_list``, ``scheduled_task_run_now``, ``scheduled_task_pause``, ``scheduled_task_resume``, ``scheduled_task_delete_propose``.
+- When the user asks to run something daily/weekly/monthly/yearly at a set wall-clock time, use ``scheduled_task_propose``.
+- You **MUST** fill ``execution_plan`` with ``procedure``, non-empty ``allowed_tools`` (every tool name the task will use), and ``codemode_scripts`` when using Code Mode.
+- Schedule times use the **scheduler timezone** shown below (not UTC unless that is the configured zone).
+- Trackers (above) are metric collectors; scheduled tasks are full agent runs with an approved tool allowlist.
+
 ## Guidelines
 - Act, don't ask. You have tools — use them. Install packages, run commands, create files, scan networks. \
 Do it and report the results. Do not ask "would you like me to..." for safe, reversible operations.
@@ -151,7 +183,7 @@ previously learned facts. Not all retrieved memories will be relevant — use ju
 {memory_section}
 {summary_section}
 {trackers_section}
-Current time: {current_time}
+Current time (UTC): {current_time}{local_time_line}
 Workspace: {workspace}"""
 
 
@@ -250,6 +282,8 @@ def _build_system_prompt(
     skills_path: str = "",
     learning: LearningConfig | None = None,
     trackers_section: str = "",
+    local_time_line: str = "",
+    extra_section: str = "",
 ) -> str:
     memory_section = ""
     if memories:
@@ -271,14 +305,18 @@ def _build_system_prompt(
         if content:
             skills_section = f"\n\n## Cloud3 SRE Environment\n\n{content}\n\n"
 
-    return SYSTEM_PROMPT_TEMPLATE.format(
+    prompt = SYSTEM_PROMPT_TEMPLATE.format(
         memory_section=memory_section,
         summary_section=summary_section,
         trackers_section=trackers_section,
         skills_section=skills_section,
         current_time=current_time,
+        local_time_line=local_time_line,
         workspace=workspace,
     )
+    if extra_section.strip():
+        prompt = prompt + "\n\n" + extra_section.strip()
+    return prompt
 
 
 class Agent:
@@ -311,6 +349,7 @@ class Agent:
         # Per-session guard: same MCP tool+args + SDK isError twice → skip further calls (no approval spam).
         self._mcp_repeat_guard: dict[str, dict[str, Any]] = {}
         self._tracker_scheduler: TrackerScheduler | None = None
+        self._task_scheduler: TaskScheduler | None = None
         self._tracker_compact_task: asyncio.Task[Any] | None = None
         self._tracker_compact_runs: int = 0
         init_tracker_tool_context(
@@ -321,6 +360,16 @@ class Agent:
         init_tracker_decision_runtime(
             memory=self.memory,
             get_scheduler=self._get_tracker_scheduler,
+        )
+        init_scheduled_task_tool_context(
+            memory=self.memory,
+            config=self.config,
+            get_scheduler=self._get_task_scheduler,
+        )
+        init_task_decision_runtime(
+            memory=self.memory,
+            get_scheduler=self._get_task_scheduler,
+            timezone=self.config.scheduler.timezone,
         )
         init_context_compress(self.config)
 
@@ -420,18 +469,36 @@ class Agent:
 
         # 3. Build prompt
         from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+
         now = datetime.now(timezone.utc).isoformat()
+        local_time_line = ""
+        if getattr(self.config, "scheduler", None) and self.config.scheduler.enabled:
+            try:
+                tz = ZoneInfo(self.config.scheduler.timezone)
+                local_now = datetime.now(tz).strftime("%Y-%m-%d %H:%M %Z")
+                local_time_line = (
+                    f"\nScheduler timezone ({self.config.scheduler.timezone}): {local_now}"
+                )
+            except Exception:
+                pass
         trackers_section = ""
         if self.config.trackers.enabled:
             tb = _format_active_trackers_block(self.memory, self.config.trackers)
             if tb:
                 trackers_section = tb + "\n\n"
+        overrides = _get_process_overrides()
+        extra_section = str(overrides.get("system_addendum") or "").strip()
+        if extra_section:
+            extra_section = "## Scheduled Task Context\n" + extra_section
         system = _build_system_prompt(
             memories, summary, now,
             self.config.agent.workspace,
             self.config.agent.skills_path,
             learning=self.config.learning,
             trackers_section=trackers_section,
+            local_time_line=local_time_line,
+            extra_section=extra_section,
         )
         recent = self.memory.get_recent_messages(
             session_id, limit=self.config.agent.recent_messages_limit
@@ -467,14 +534,17 @@ class Agent:
 
         # 7. Tool call loop
         rounds = 0
+        max_rounds = int(overrides.get("max_tool_rounds") or self.max_tool_rounds)
         total_native_tool_calls = 0
         had_tool_error = False
+        had_blocked_tool = False
         mcp_tool_trace: list[dict[str, str]] = []
+        scheduled_tool_trace = overrides.get("tool_trace")
         capture_trace = (
             self.config.learning.enabled
             and user_requests_skill_capture(text_for_memory)
         )
-        while response.has_tool_calls() and rounds < self.max_tool_rounds:
+        while response.has_tool_calls() and rounds < max_rounds:
             rounds += 1
 
             # Append assistant message with tool calls
@@ -559,6 +629,12 @@ class Agent:
                     or result.startswith("Blocked:")
                 ):
                     had_tool_error = True
+                if result.startswith("Blocked:"):
+                    had_blocked_tool = True
+                if isinstance(scheduled_tool_trace, list):
+                    scheduled_tool_trace.append(
+                        {"tool": tc.name, "arguments": tc.arguments, "result": result[:2000]}
+                    )
                 if tc.name == "load_skill" and is_native_tool(tc.name):
                     try:
                         args = json.loads(tc.arguments) if isinstance(tc.arguments, str) else tc.arguments
@@ -589,7 +665,7 @@ class Agent:
             )
             response = await self._llm_chat(messages, tools, input_budget, text_for_memory)
 
-        if rounds >= self.max_tool_rounds:
+        if rounds >= max_rounds:
             log_event(logger, "tool_loop_limit", session_id=session_id, rounds=rounds)
             # Ask the LLM to wrap up without tools
             messages.append({
@@ -642,7 +718,7 @@ class Agent:
         # persists a durable row in pending_approvals, and notifies the admin.
         # The admin's reply (possibly after a restart) drives the actual build
         # via handle_skill_decision.
-        if self.config.learning.enabled:
+        if self.config.learning.enabled and not overrides.get("skip_skill_proposal"):
             try:
                 await self._skill_learner.maybe_propose_skill(
                     session_id,
@@ -658,8 +734,14 @@ class Agent:
             except Exception:
                 logger.exception("Skill proposal failed")
 
-        log_event(logger, "agent_response", session_id=session_id,
-                  memory_hits=len(memories), tool_rounds=rounds)
+        log_event(
+            logger,
+            "agent_response",
+            session_id=session_id,
+            memory_hits=len(memories),
+            tool_rounds=rounds,
+            blocked_tool=had_blocked_tool,
+        )
         return content
 
     # --------------------------------------------------- skill approval state
@@ -855,7 +937,99 @@ class Agent:
 
     def tracker_recovery_digest(self, *, recipient: str | None = None) -> str:
         """Text block for startup recovery (CLI/Signal)."""
-        return format_tracker_recovery_message(self.memory, recipient=recipient)
+        parts = [
+            format_tracker_recovery_message(self.memory, recipient=recipient),
+            format_task_recovery_message(self.memory, recipient=recipient),
+        ]
+        return "\n".join(p for p in parts if p.strip())
+
+    async def run_scheduled_task(self, task: ScheduledTaskRow) -> dict[str, Any]:
+        """Execute one approved scheduled task with tool allowlist enforcement."""
+        plan = task.execution_plan or {}
+        allowed_raw = plan.get("allowed_tools") or []
+        allowed = frozenset(str(t).strip() for t in allowed_raw if str(t).strip())
+        if not allowed:
+            return {
+                "status": "failed",
+                "summary": "Task has empty allowed_tools in execution_plan.",
+                "tool_trace": [],
+            }
+
+        parts: list[str] = []
+        if task.system_addendum:
+            parts.append(str(task.system_addendum))
+        procedure = plan.get("procedure")
+        if procedure:
+            parts.append(f"Approved procedure:\n{procedure}")
+        scripts = plan.get("codemode_scripts") or []
+        if isinstance(scripts, list) and scripts:
+            script_lines = ["Approved codemode scripts:"]
+            for sc in scripts:
+                if isinstance(sc, dict):
+                    purpose = sc.get("purpose") or "script"
+                    code = sc.get("code") or ""
+                    script_lines.append(f"- {purpose}:\n```\n{code}\n```")
+            parts.append("\n".join(script_lines))
+        parts.append(
+            "You may ONLY use these tools (others will be blocked): "
+            + ", ".join(sorted(allowed))
+        )
+        addendum = "\n\n".join(parts)
+        max_rounds = int(plan.get("max_tool_rounds") or 15)
+        tool_trace: list[dict[str, str]] = []
+
+        exec_token = enter_scheduled_execution(task.slug, allowed)
+        proc_token = enter_process_overrides(
+            system_addendum=addendum,
+            skip_skill_proposal=True,
+            max_tool_rounds=max_rounds,
+            tool_trace=tool_trace,
+        )
+        try:
+            content = await self.process(task.user_prompt, f"scheduled-{task.slug}")
+        finally:
+            exit_scheduled_execution(exec_token)
+            exit_process_overrides(proc_token)
+
+        status = "ok"
+        if any(str(t.get("result", "")).startswith("Blocked:") for t in tool_trace):
+            status = "blocked_tool"
+        elif any("Error" in str(t.get("result", "")) for t in tool_trace):
+            status = "failed"
+
+        return {"status": status, "summary": content, "tool_trace": tool_trace}
+
+    def _get_task_scheduler(self) -> TaskScheduler | None:
+        return self._task_scheduler
+
+    def start_task_scheduler_loop(self) -> None:
+        """Spawn calendar task scheduler."""
+        if not self.config.scheduler.enabled:
+            return
+        if self._task_scheduler is not None:
+            return
+
+        async def _run(task: ScheduledTaskRow) -> dict[str, Any]:
+            return await self.run_scheduled_task(task)
+
+        self._task_scheduler = TaskScheduler(
+            self.memory,
+            self.config.scheduler,
+            run_task=_run,
+        )
+
+        async def _boot() -> None:
+            if self._task_scheduler is not None:
+                await self._task_scheduler.start()
+
+        asyncio.create_task(_boot(), name="task-scheduler-boot")
+        log_event(logger, "task_scheduler_loop_scheduled")
+
+    async def stop_task_scheduler_loop(self) -> None:
+        if self._task_scheduler is None:
+            return
+        await self._task_scheduler.stop()
+        self._task_scheduler = None
 
     async def run_tracker_compaction_once(self, *, vacuum: bool = False) -> dict[str, int]:
         """One-shot compaction (CLI / operator)."""

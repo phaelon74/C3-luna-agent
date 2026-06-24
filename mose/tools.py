@@ -7,6 +7,7 @@ import json
 import os
 import re
 import time
+from contextvars import ContextVar, Token
 from pathlib import Path
 from typing import Any, Callable
 
@@ -111,6 +112,15 @@ _tracker_config: "Any | None" = None
 _get_tracker_scheduler: Callable[[], Any] | None = None
 _tracker_propose_callback: Callable[..., Any] | None = None
 
+# Scheduled tasks — set by init_scheduled_task_tool_context() at startup
+_scheduled_task_memory: Any | None = None
+_scheduled_task_config: Any | None = None
+_get_task_scheduler: Callable[[], Any | None] | None = None
+
+_scheduled_exec_ctx: ContextVar[dict[str, Any] | None] = ContextVar(
+    "scheduled_exec_ctx", default=None
+)
+
 
 def init_tool_registry(mcp: "MCPManager", config: Any | None = None) -> None:
     """Register the MCP manager so meta-tools can discover and call MCP tools."""
@@ -171,6 +181,59 @@ def init_tracker_tool_context(
 def init_tracker_propose_callback(callback: Callable[..., Any] | None) -> None:
     global _tracker_propose_callback
     _tracker_propose_callback = callback
+
+
+def init_scheduled_task_tool_context(
+    *,
+    memory: Any,
+    config: Any,
+    get_scheduler: Callable[[], Any | None],
+) -> None:
+    global _scheduled_task_memory, _scheduled_task_config, _get_task_scheduler
+    _scheduled_task_memory = memory
+    _scheduled_task_config = config
+    _get_task_scheduler = get_scheduler
+
+
+def enter_scheduled_execution(slug: str, allowed_tools: frozenset[str]) -> Token:
+    return _scheduled_exec_ctx.set({"slug": slug, "allowed_tools": allowed_tools})
+
+
+def exit_scheduled_execution(token: Token) -> None:
+    _scheduled_exec_ctx.reset(token)
+
+
+def get_scheduled_execution_slug() -> str | None:
+    ctx = _scheduled_exec_ctx.get()
+    if not ctx:
+        return None
+    return str(ctx.get("slug") or "") or None
+
+
+def _scheduled_tool_block_reason(tool_name: str) -> str | None:
+    ctx = _scheduled_exec_ctx.get()
+    if ctx is None:
+        return None
+    allowed = ctx.get("allowed_tools") or frozenset()
+    if tool_name not in allowed:
+        log_event(
+            logger,
+            "scheduled_task_tool_blocked",
+            slug=ctx.get("slug"),
+            tool=tool_name,
+        )
+        return (
+            f"Blocked: tool '{tool_name}' is not in the approved scheduled task allowlist."
+        )
+    return None
+
+
+def scheduled_execution_bypasses_approval(tool_name: str) -> bool:
+    ctx = _scheduled_exec_ctx.get()
+    if ctx is None:
+        return False
+    allowed = ctx.get("allowed_tools") or frozenset()
+    return tool_name in allowed
 
 
 def init_terminal(cfg: "TerminalConfig", workspace: str) -> None:
@@ -662,6 +725,122 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "scheduled_task_propose",
+            "description": (
+                "Propose a calendar-scheduled agent task (human must approve). "
+                "Use when the user asks to run something daily/weekly/monthly/yearly at a set time. "
+                "You MUST supply execution_plan with procedure, allowed_tools, and codemode_scripts "
+                "listing every tool the task will use. Times use the configured scheduler timezone."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "Unique kebab-case id."},
+                    "description": {"type": "string", "description": "What this task does."},
+                    "recurrence": {
+                        "type": "object",
+                        "description": (
+                            "Schedule: frequency daily|weekly|monthly|yearly, hour (0-23), minute (0-59); "
+                            "weekly needs day_of_week (0=Mon); monthly/yearly need day_of_month (1-28); "
+                            "yearly needs month (1-12)."
+                        ),
+                    },
+                    "user_prompt": {
+                        "type": "string",
+                        "description": "Prompt sent to the agent when the task fires.",
+                    },
+                    "system_addendum": {
+                        "type": "string",
+                        "description": "Extra system instructions for the scheduled run.",
+                    },
+                    "execution_plan": {
+                        "type": "object",
+                        "description": (
+                            "Required: procedure (str), allowed_tools (list of tool names), "
+                            "optional codemode_scripts [{purpose, code}], max_tool_rounds."
+                        ),
+                    },
+                    "recipients": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "signal:admin, signal:engagement, or log_only",
+                    },
+                    "created_by_session": {"type": "string"},
+                },
+                "required": [
+                    "slug",
+                    "description",
+                    "recurrence",
+                    "user_prompt",
+                    "execution_plan",
+                ],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scheduled_task_delete_propose",
+            "description": "Propose deleting a scheduled task (requires human approval).",
+            "parameters": {
+                "type": "object",
+                "properties": {"target_slug": {"type": "string"}},
+                "required": ["target_slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scheduled_task_list",
+            "description": "List scheduled tasks with next run times.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "enabled_only": {"type": "boolean"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scheduled_task_pause",
+            "description": "Pause a scheduled task (no approval).",
+            "parameters": {
+                "type": "object",
+                "properties": {"slug": {"type": "string"}},
+                "required": ["slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scheduled_task_resume",
+            "description": "Resume a paused scheduled task and recompute next run.",
+            "parameters": {
+                "type": "object",
+                "properties": {"slug": {"type": "string"}},
+                "required": ["slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scheduled_task_run_now",
+            "description": "Run a scheduled task immediately (enforces approved tool allowlist).",
+            "parameters": {
+                "type": "object",
+                "properties": {"slug": {"type": "string"}},
+                "required": ["slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "sre_execute",
             "description": (
                 "Execute a command that modifies system state (restart, update, delete, etc.). "
@@ -713,6 +892,10 @@ async def call_native_tool(
     """Dispatch a native tool call and return the result string."""
     if isinstance(arguments, str):
         arguments = json.loads(arguments) if arguments else {}
+
+    block = _scheduled_tool_block_reason(name)
+    if block:
+        return block
 
     handler = _TOOL_REGISTRY.get(name)
     if handler is None:
@@ -818,19 +1001,22 @@ async def _tool_sre_execute(args: dict, **kwargs) -> str:
     if is_dangerous_command(command):
         return f"Blocked: dangerous pattern in command: {command!r}"
 
-    if _approval_callback is None:
-        log_event(logger, "sre_execute_denied", reason="no_approval_callback", target_system=target_system)
-        return "Execution denied: no approval callback configured. Run with CLI or Discord to enable approval."
+    if not scheduled_execution_bypasses_approval("sre_execute"):
+        if _approval_callback is None:
+            log_event(logger, "sre_execute_denied", reason="no_approval_callback", target_system=target_system)
+            return "Execution denied: no approval callback configured. Run with CLI or Discord to enable approval."
 
-    result = _approval_callback(command, reason, target_system)
-    if asyncio.iscoroutine(result):
-        approved = await result
+        result = _approval_callback(command, reason, target_system)
+        if asyncio.iscoroutine(result):
+            approved = await result
+        else:
+            approved = bool(result)
+
+        if not approved:
+            log_event(logger, "sre_execute_denied", reason="operator_denied", target_system=target_system)
+            return "Execution denied by operator."
     else:
-        approved = bool(result)
-
-    if not approved:
-        log_event(logger, "sre_execute_denied", reason="operator_denied", target_system=target_system)
-        return "Execution denied by operator."
+        log_event(logger, "sre_execute_scheduled_bypass", target_system=target_system)
 
     log_event(logger, "sre_execute_approved", target_system=target_system)
     timeout = min(args.get("timeout", BASH_DEFAULT_TIMEOUT), BASH_MAX_TIMEOUT)
@@ -1074,32 +1260,42 @@ async def execute_mcp_tool(full_name: str, arguments: dict[str, Any]) -> tuple[s
     bare_tool = bare_tool.strip()
     if not server or not bare_tool:
         return "Error: invalid MCP tool name (empty server or tool segment).", False
+
+    block = _scheduled_tool_block_reason(full_name)
+    if block:
+        return block, False
+
     policy = classify_mcp_tool(server, bare_tool)
     if policy != "read":
-        if _approval_callback is None:
-            log_event(
-                logger,
-                "use_tool_denied",
-                reason="no_approval_callback",
-                tool=full_name,
+        if not scheduled_execution_bypasses_approval(full_name):
+            if _approval_callback is None:
+                log_event(
+                    logger,
+                    "use_tool_denied",
+                    reason="no_approval_callback",
+                    tool=full_name,
+                )
+                return (
+                    "Execution denied: no approval callback configured. "
+                    "Mutating MCP tools require human approval — configure Signal "
+                    "(SIGNAL_ADMIN_GROUP_ID) or use CLI / Discord with approval enabled.",
+                    False,
+                )
+            command, reason, target_system = format_mcp_mutate_approval_command(
+                full_name, arguments
             )
-            return (
-                "Execution denied: no approval callback configured. "
-                "Mutating MCP tools require human approval — configure Signal "
-                "(SIGNAL_ADMIN_GROUP_ID) or use CLI / Discord with approval enabled.",
-                False,
-            )
-        command, reason, target_system = format_mcp_mutate_approval_command(full_name, arguments)
-        approved = await invoke_approval_callback(command, reason, target_system)
-        if not approved:
-            log_event(
-                logger,
-                "use_tool_denied",
-                reason="operator_denied",
-                tool=full_name,
-            )
-            return "Execution denied by operator.", False
-        log_event(logger, "use_tool_approved", tool=full_name, target_system=target_system)
+            approved = await invoke_approval_callback(command, reason, target_system)
+            if not approved:
+                log_event(
+                    logger,
+                    "use_tool_denied",
+                    reason="operator_denied",
+                    tool=full_name,
+                )
+                return "Execution denied by operator.", False
+            log_event(logger, "use_tool_approved", tool=full_name, target_system=target_system)
+        else:
+            log_event(logger, "use_tool_scheduled_bypass", tool=full_name)
 
     return await _mcp_manager.call_tool(full_name, arguments)
 
@@ -1758,6 +1954,169 @@ async def _tool_tracker_run_now(args: dict, **kwargs) -> str:
     return await sch.run_once(slug)
 
 
+async def _tool_scheduled_task_propose(args: dict, **kwargs) -> str:
+    from mose.schedule import RecurrenceError, validate_recurrence
+    from mose.task_decision import SCHEDULED_TASK_PROPOSAL_KIND, notify_task_proposal
+
+    if _scheduled_task_memory is None or _scheduled_task_config is None:
+        return "Error: scheduled task subsystem not initialized."
+    slug = str(args.get("slug") or "").strip()
+    if not _VALID_TRACKER_SLUG.match(slug):
+        return "Error: slug must match kebab-case [a-z0-9]+(-[a-z0-9]+)*."
+    desc = str(args.get("description") or "").strip()
+    if not desc:
+        return "Error: description is required."
+    user_prompt = str(args.get("user_prompt") or "").strip()
+    if not user_prompt:
+        return "Error: user_prompt is required."
+    plan = args.get("execution_plan")
+    if not isinstance(plan, dict):
+        return "Error: execution_plan must be an object."
+    allowed = plan.get("allowed_tools")
+    if not isinstance(allowed, list) or not allowed:
+        return "Error: execution_plan.allowed_tools must be a non-empty list."
+    procedure = str(plan.get("procedure") or "").strip()
+    if not procedure:
+        return "Error: execution_plan.procedure is required."
+    try:
+        recurrence = validate_recurrence(args.get("recurrence") or {})
+    except RecurrenceError as e:
+        return f"Error: {e}"
+    recips = args.get("recipients")
+    if recips is not None and not isinstance(recips, list):
+        return "Error: recipients must be a list or omitted."
+    if recips is None:
+        recips = [getattr(_scheduled_task_config.scheduler, "default_recipient", "signal:admin")]
+    recipient = str(getattr(_scheduled_task_config.signal, "admin_group_id", "") or "").strip() or "cli"
+    expires_at = time.time() + int(
+        getattr(_scheduled_task_config.signal, "proposal_timeout_seconds", 43200)
+    )
+    payload = {
+        "task_slug": slug,
+        "description": desc,
+        "recurrence": recurrence,
+        "user_prompt": user_prompt,
+        "system_addendum": args.get("system_addendum"),
+        "execution_plan": plan,
+        "recipients": recips,
+        "created_by_session": args.get("created_by_session"),
+    }
+    _scheduled_task_memory.save_pending_approval(
+        slug=slug,
+        kind=SCHEDULED_TASK_PROPOSAL_KIND,
+        recipient=recipient,
+        proposal_path="",
+        payload=payload,
+        expires_at=expires_at,
+    )
+    await notify_task_proposal(slug, payload, expires_at)
+    return (
+        f"Scheduled task proposal '{slug}' recorded. "
+        "Awaiting admin approval (approve <slug> in Signal or python -m mose --decide <slug> y)."
+    )
+
+
+async def _tool_scheduled_task_delete_propose(args: dict, **kwargs) -> str:
+    from mose.task_decision import SCHEDULED_TASK_DELETION_KIND, notify_task_proposal
+
+    if _scheduled_task_memory is None or _scheduled_task_config is None:
+        return "Error: scheduled task subsystem not initialized."
+    target = str(args.get("target_slug") or "").strip()
+    if not _VALID_TRACKER_SLUG.match(target):
+        return "Error: target_slug must be kebab-case."
+    if _scheduled_task_memory.get_scheduled_task(target) is None:
+        return f"Error: no scheduled task named '{target}'."
+    pending_slug = f"task-del-{target}"
+    recipient = str(getattr(_scheduled_task_config.signal, "admin_group_id", "") or "").strip() or "cli"
+    expires_at = time.time() + int(
+        getattr(_scheduled_task_config.signal, "proposal_timeout_seconds", 43200)
+    )
+    payload = {"target_slug": target, "description": f"Delete scheduled task {target}"}
+    _scheduled_task_memory.save_pending_approval(
+        slug=pending_slug,
+        kind=SCHEDULED_TASK_DELETION_KIND,
+        recipient=recipient,
+        proposal_path="",
+        payload=payload,
+        expires_at=expires_at,
+    )
+    await notify_task_proposal(pending_slug, payload, expires_at)
+    return (
+        f"Deletion proposal '{pending_slug}' recorded. "
+        "Admin must approve: python -m mose --decide <slug> y|n"
+    )
+
+
+async def _tool_scheduled_task_list(args: dict, **kwargs) -> str:
+    from mose.schedule import format_next_run
+
+    if _scheduled_task_memory is None or _scheduled_task_config is None:
+        return "Error: scheduled task subsystem not initialized."
+    enabled_only = bool(args.get("enabled_only"))
+    tz = str(getattr(_scheduled_task_config.scheduler, "timezone", "UTC"))
+    tasks = _scheduled_task_memory.list_scheduled_tasks(enabled_only=enabled_only)
+    out = []
+    for t in tasks:
+        out.append(
+            {
+                "slug": t.slug,
+                "description": t.description,
+                "enabled": t.enabled,
+                "next_run": format_next_run(t.next_run_at, tz),
+                "last_status": t.last_status,
+                "consecutive_failures": t.consecutive_failures,
+                "recipients": t.recipients,
+            }
+        )
+    return json.dumps(out, indent=2)
+
+
+async def _tool_scheduled_task_pause(args: dict, **kwargs) -> str:
+    if _scheduled_task_memory is None:
+        return "Error: scheduled task subsystem not initialized."
+    slug = str(args.get("slug") or "").strip()
+    if not slug:
+        return "Error: slug is required."
+    if not _scheduled_task_memory.update_scheduled_task(slug, enabled=False):
+        return f"Error: unknown scheduled task '{slug}'."
+    return f"Scheduled task '{slug}' paused."
+
+
+async def _tool_scheduled_task_resume(args: dict, **kwargs) -> str:
+    from mose.schedule import compute_next_run
+
+    if _scheduled_task_memory is None or _scheduled_task_config is None:
+        return "Error: scheduled task subsystem not initialized."
+    slug = str(args.get("slug") or "").strip()
+    if not slug:
+        return "Error: slug is required."
+    task = _scheduled_task_memory.get_scheduled_task(slug)
+    if task is None:
+        return f"Error: unknown scheduled task '{slug}'."
+    tz = str(getattr(_scheduled_task_config.scheduler, "timezone", "UTC"))
+    next_run = compute_next_run(task.recurrence, tz, after=time.time())
+    _scheduled_task_memory.update_scheduled_task(
+        slug,
+        enabled=True,
+        consecutive_failures=0,
+        next_run_at=next_run,
+    )
+    sch = _get_task_scheduler() if _get_task_scheduler else None
+    if sch is not None:
+        await sch.reconcile()
+    return f"Scheduled task '{slug}' resumed."
+
+
+async def _tool_scheduled_task_run_now(args: dict, **kwargs) -> str:
+    sch = _get_task_scheduler() if _get_task_scheduler else None
+    if sch is None:
+        return "Error: task scheduler not running."
+    slug = str(args.get("slug") or "").strip()
+    if not slug:
+        return "Error: slug is required."
+    return await sch.run_once(slug)
+
+
 # --- Registry ---
 
 _TOOL_REGISTRY: dict[str, Any] = {
@@ -1781,4 +2140,10 @@ _TOOL_REGISTRY: dict[str, Any] = {
     "tracker_pause": _tool_tracker_pause,
     "tracker_resume": _tool_tracker_resume,
     "tracker_run_now": _tool_tracker_run_now,
+    "scheduled_task_propose": _tool_scheduled_task_propose,
+    "scheduled_task_delete_propose": _tool_scheduled_task_delete_propose,
+    "scheduled_task_list": _tool_scheduled_task_list,
+    "scheduled_task_pause": _tool_scheduled_task_pause,
+    "scheduled_task_resume": _tool_scheduled_task_resume,
+    "scheduled_task_run_now": _tool_scheduled_task_run_now,
 }

@@ -196,6 +196,20 @@ class TrackersConfig:
 
 
 @dataclass
+class SchedulerConfig:
+    """Calendar-aware scheduled agent tasks."""
+
+    enabled: bool = True
+    timezone: str = "America/Chicago"
+    reconcile_interval_seconds: int = 60
+    run_timeout_seconds: int = 600
+    max_concurrent_runs: int = 1
+    failure_threshold: int = 5
+    default_recipient: str = "signal:admin"
+    run_retention_days: int = 90
+
+
+@dataclass
 class LearningConfig:
     """Skill proposal/learning loop and periodic skill-quality review.
 
@@ -235,6 +249,7 @@ class Config:
     terminal: TerminalConfig = field(default_factory=TerminalConfig)
     learning: LearningConfig = field(default_factory=LearningConfig)
     trackers: TrackersConfig = field(default_factory=TrackersConfig)
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     portal: PortalConfig = field(default_factory=PortalConfig)
     root_dir: Path = _ROOT
 
@@ -276,6 +291,8 @@ def load_config(config_path: Path | None = None) -> Config:
             _apply_section(cfg.learning, raw["learning"])
         if "trackers" in raw:
             _apply_section(cfg.trackers, raw["trackers"])
+        if "scheduler" in raw:
+            _apply_section(cfg.scheduler, raw["scheduler"])
         if "portal" in raw:
             _apply_section(cfg.portal, raw["portal"])
 
@@ -346,6 +363,11 @@ def load_config(config_path: Path | None = None) -> Config:
         cfg.trackers.failure_threshold = int(tft)
     if (tci := os.environ.get("TRACKERS_COMPACTION_INTERVAL_HOURS")) is not None and str(tci).strip():
         cfg.trackers.compaction_interval_hours = int(tci)
+
+    if (se := _env_optional_bool("SCHEDULER_ENABLED")) is not None:
+        cfg.scheduler.enabled = se
+    if (stz := os.environ.get("SCHEDULER_TIMEZONE")) is not None and str(stz).strip():
+        cfg.scheduler.timezone = str(stz).strip()
 
     cfg.signal.phone_number = (cfg.signal.phone_number or "").strip()
     cfg.signal.engagement_group_id = (cfg.signal.engagement_group_id or "").strip()

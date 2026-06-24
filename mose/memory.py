@@ -129,6 +129,38 @@ CREATE TABLE IF NOT EXISTS tracker_alerts (
 CREATE INDEX IF NOT EXISTS idx_tracker_alerts_tid_rule ON tracker_alerts(tracker_id, rule_id);
 """
 
+SCHEDULED_TASKS_SQL = """
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+    id INTEGER PRIMARY KEY,
+    slug TEXT UNIQUE NOT NULL,
+    description TEXT NOT NULL,
+    recurrence TEXT NOT NULL,
+    user_prompt TEXT NOT NULL,
+    system_addendum TEXT,
+    execution_plan TEXT NOT NULL,
+    recipients TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    next_run_at REAL NOT NULL,
+    created_by_session TEXT,
+    created_at REAL NOT NULL,
+    last_run_at REAL,
+    last_status TEXT,
+    consecutive_failures INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_enabled_next ON scheduled_tasks(enabled, next_run_at);
+CREATE TABLE IF NOT EXISTS scheduled_task_runs (
+    id INTEGER PRIMARY KEY,
+    task_id INTEGER NOT NULL,
+    started_at REAL NOT NULL,
+    finished_at REAL,
+    status TEXT NOT NULL,
+    summary TEXT,
+    tool_trace TEXT,
+    FOREIGN KEY (task_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_tid ON scheduled_task_runs(task_id, started_at);
+"""
+
 FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content,
@@ -175,6 +207,36 @@ class PendingApproval:
 
 
 @dataclass
+class ScheduledTaskRow:
+    id: int
+    slug: str
+    description: str
+    recurrence: dict[str, Any]
+    user_prompt: str
+    system_addendum: str | None
+    execution_plan: dict[str, Any]
+    recipients: list[str]
+    enabled: bool
+    next_run_at: float
+    created_by_session: str | None
+    created_at: float
+    last_run_at: float | None
+    last_status: str | None
+    consecutive_failures: int
+
+
+@dataclass
+class ScheduledTaskRunRow:
+    id: int
+    task_id: int
+    started_at: float
+    finished_at: float | None
+    status: str
+    summary: str | None
+    tool_trace: list[Any]
+
+
+@dataclass
 class TrackerRow:
     id: int
     slug: str
@@ -216,6 +278,7 @@ class MemoryManager:
         self._ensure_skill_usage()
         self._ensure_pending_approvals()
         self._ensure_trackers()
+        self._ensure_scheduled_tasks()
         log_event(logger, "memory_initialized", db_path=config.db_path)
 
     def _init_schema(self) -> None:
@@ -257,6 +320,14 @@ class MemoryManager:
         ).fetchone()
         if not row:
             self.db.executescript(TRACKERS_SQL)
+            self.db.commit()
+
+    def _ensure_scheduled_tasks(self) -> None:
+        row = self.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_tasks'"
+        ).fetchone()
+        if not row:
+            self.db.executescript(SCHEDULED_TASKS_SQL)
             self.db.commit()
 
     # ---------------------------------------------------------- approvals
@@ -1176,6 +1247,267 @@ class MemoryManager:
             "deleted_rollups": deleted_rollups,
             "deleted_alerts": deleted_alerts,
         }
+
+    # ---------------------------------------------------------- scheduled tasks
+
+    def _parse_json_dict(self, raw: Any) -> dict[str, Any]:
+        if raw is None or raw == "":
+            return {}
+        if isinstance(raw, dict):
+            return raw
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return {}
+
+    def _row_to_scheduled_task(self, row: tuple[Any, ...] | None) -> ScheduledTaskRow | None:
+        if row is None:
+            return None
+        (
+            tid,
+            slug,
+            description,
+            recurrence,
+            user_prompt,
+            system_addendum,
+            execution_plan,
+            recipients,
+            enabled,
+            next_run_at,
+            created_by_session,
+            created_at,
+            last_run_at,
+            last_status,
+            consecutive_failures,
+        ) = row
+        return ScheduledTaskRow(
+            id=int(tid),
+            slug=str(slug),
+            description=str(description),
+            recurrence=self._parse_json_dict(recurrence),
+            user_prompt=str(user_prompt),
+            system_addendum=str(system_addendum) if system_addendum else None,
+            execution_plan=self._parse_json_dict(execution_plan),
+            recipients=self._parse_json_str_list(recipients),
+            enabled=bool(enabled),
+            next_run_at=float(next_run_at),
+            created_by_session=created_by_session,
+            created_at=float(created_at),
+            last_run_at=float(last_run_at) if last_run_at is not None else None,
+            last_status=str(last_status) if last_status is not None else None,
+            consecutive_failures=int(consecutive_failures or 0),
+        )
+
+    def _row_to_scheduled_task_run(self, row: tuple[Any, ...] | None) -> ScheduledTaskRunRow | None:
+        if row is None:
+            return None
+        rid, task_id, started_at, finished_at, status, summary, tool_trace = row
+        trace = self._parse_json_list(tool_trace)
+        return ScheduledTaskRunRow(
+            id=int(rid),
+            task_id=int(task_id),
+            started_at=float(started_at),
+            finished_at=float(finished_at) if finished_at is not None else None,
+            status=str(status),
+            summary=str(summary) if summary is not None else None,
+            tool_trace=trace,
+        )
+
+    def create_scheduled_task(
+        self,
+        *,
+        slug: str,
+        description: str,
+        recurrence: dict[str, Any],
+        user_prompt: str,
+        system_addendum: str | None = None,
+        execution_plan: dict[str, Any],
+        recipients: list[str] | None = None,
+        next_run_at: float,
+        created_by_session: str | None = None,
+        enabled: bool = True,
+    ) -> int:
+        now = time.time()
+        cur = self.db.execute(
+            "INSERT INTO scheduled_tasks (slug, description, recurrence, user_prompt, "
+            "system_addendum, execution_plan, recipients, enabled, next_run_at, "
+            "created_by_session, created_at, last_run_at, last_status, consecutive_failures) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0)",
+            (
+                slug,
+                description,
+                json.dumps(recurrence),
+                user_prompt,
+                system_addendum,
+                json.dumps(execution_plan),
+                json.dumps(recipients or ["signal:admin"]),
+                1 if enabled else 0,
+                next_run_at,
+                created_by_session,
+                now,
+            ),
+        )
+        self.db.commit()
+        log_event(logger, "scheduled_task_created", slug=slug, task_id=cur.lastrowid)
+        return int(cur.lastrowid)
+
+    def update_scheduled_task(self, slug: str, **fields: Any) -> bool:
+        if not fields:
+            return False
+        allowed = {
+            "description",
+            "recurrence",
+            "user_prompt",
+            "system_addendum",
+            "execution_plan",
+            "recipients",
+            "enabled",
+            "next_run_at",
+            "last_run_at",
+            "last_status",
+            "consecutive_failures",
+        }
+        sets: list[str] = []
+        vals: list[Any] = []
+        for k, v in fields.items():
+            if k not in allowed:
+                continue
+            if k in ("recurrence", "execution_plan"):
+                v = json.dumps(v if v is not None else {})
+            elif k == "recipients":
+                v = json.dumps(v if v is not None else [])
+            elif k == "enabled":
+                v = 1 if v else 0
+            sets.append(f"{k} = ?")
+            vals.append(v)
+        if not sets:
+            return False
+        vals.append(slug)
+        cur = self.db.execute(
+            f"UPDATE scheduled_tasks SET {', '.join(sets)} WHERE slug = ?",
+            vals,
+        )
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def delete_scheduled_task(self, slug: str) -> bool:
+        cur = self.db.execute("DELETE FROM scheduled_tasks WHERE slug = ?", (slug,))
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def get_scheduled_task(self, slug: str) -> ScheduledTaskRow | None:
+        row = self.db.execute(
+            "SELECT id, slug, description, recurrence, user_prompt, system_addendum, "
+            "execution_plan, recipients, enabled, next_run_at, created_by_session, created_at, "
+            "last_run_at, last_status, consecutive_failures FROM scheduled_tasks WHERE slug = ?",
+            (slug,),
+        ).fetchone()
+        return self._row_to_scheduled_task(row)
+
+    def list_scheduled_tasks(self, *, enabled_only: bool = False) -> list[ScheduledTaskRow]:
+        sql = (
+            "SELECT id, slug, description, recurrence, user_prompt, system_addendum, "
+            "execution_plan, recipients, enabled, next_run_at, created_by_session, created_at, "
+            "last_run_at, last_status, consecutive_failures FROM scheduled_tasks"
+        )
+        if enabled_only:
+            sql += " WHERE enabled = 1"
+        sql += " ORDER BY slug"
+        rows = self.db.execute(sql).fetchall()
+        return [t for t in (self._row_to_scheduled_task(r) for r in rows) if t is not None]
+
+    def list_due_scheduled_tasks(self, *, now: float | None = None) -> list[ScheduledTaskRow]:
+        now = now if now is not None else time.time()
+        rows = self.db.execute(
+            "SELECT id, slug, description, recurrence, user_prompt, system_addendum, "
+            "execution_plan, recipients, enabled, next_run_at, created_by_session, created_at, "
+            "last_run_at, last_status, consecutive_failures FROM scheduled_tasks "
+            "WHERE enabled = 1 AND next_run_at <= ? ORDER BY next_run_at ASC",
+            (now,),
+        ).fetchall()
+        return [t for t in (self._row_to_scheduled_task(r) for r in rows) if t is not None]
+
+    def list_scheduled_tasks_degraded(self) -> list[ScheduledTaskRow]:
+        rows = self.db.execute(
+            "SELECT id, slug, description, recurrence, user_prompt, system_addendum, "
+            "execution_plan, recipients, enabled, next_run_at, created_by_session, created_at, "
+            "last_run_at, last_status, consecutive_failures FROM scheduled_tasks "
+            "WHERE consecutive_failures > 0 ORDER BY slug"
+        ).fetchall()
+        return [t for t in (self._row_to_scheduled_task(r) for r in rows) if t is not None]
+
+    def insert_scheduled_task_run(
+        self,
+        task_id: int,
+        *,
+        started_at: float,
+        status: str,
+        finished_at: float | None = None,
+        summary: str | None = None,
+        tool_trace: list[Any] | None = None,
+    ) -> int:
+        cur = self.db.execute(
+            "INSERT INTO scheduled_task_runs "
+            "(task_id, started_at, finished_at, status, summary, tool_trace) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                task_id,
+                started_at,
+                finished_at,
+                status,
+                summary,
+                json.dumps(tool_trace or []),
+            ),
+        )
+        self.db.commit()
+        return int(cur.lastrowid)
+
+    def update_scheduled_task_run(
+        self,
+        run_id: int,
+        *,
+        finished_at: float | None = None,
+        status: str | None = None,
+        summary: str | None = None,
+        tool_trace: list[Any] | None = None,
+    ) -> bool:
+        fields: dict[str, Any] = {}
+        if finished_at is not None:
+            fields["finished_at"] = finished_at
+        if status is not None:
+            fields["status"] = status
+        if summary is not None:
+            fields["summary"] = summary
+        if tool_trace is not None:
+            fields["tool_trace"] = json.dumps(tool_trace)
+        if not fields:
+            return False
+        sets = [f"{k} = ?" for k in fields]
+        vals = list(fields.values()) + [run_id]
+        cur = self.db.execute(
+            f"UPDATE scheduled_task_runs SET {', '.join(sets)} WHERE id = ?",
+            vals,
+        )
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def compact_scheduled_task_runs(
+        self,
+        *,
+        retention_days: int,
+        now: float | None = None,
+    ) -> int:
+        now = now if now is not None else time.time()
+        cutoff = now - max(0, retention_days) * 86400
+        cur = self.db.execute(
+            "DELETE FROM scheduled_task_runs WHERE started_at < ?",
+            (cutoff,),
+        )
+        self.db.commit()
+        return int(cur.rowcount)
 
     def close(self) -> None:
         self.db.close()

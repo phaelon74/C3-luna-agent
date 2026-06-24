@@ -78,6 +78,16 @@ compaction_interval_hours = 6
 reconcile_interval_seconds = 60
 code_timeout_seconds = 60
 
+[scheduler]
+enabled = true
+timezone = "America/Chicago"
+reconcile_interval_seconds = 60
+run_timeout_seconds = 600
+max_concurrent_runs = 1
+failure_threshold = 5
+default_recipient = "signal:admin"
+run_retention_days = 90
+
 [portal]
 # When enabled, mose-agent listens on approval_bridge_port for POST /approve (Code Mode mutating MCP).
 enabled = false

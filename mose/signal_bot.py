@@ -242,6 +242,70 @@ async def _signal_tracker_alert(tracker: Any, message: str) -> None:
         logger.exception("signal_tracker_alert_failed", extra={"slug": header})
 
 
+async def _signal_task_propose_callback(
+    slug: str, description: str, expires_at: float, payload: dict[str, Any]
+) -> None:
+    """Fire-and-forget Signal notification for scheduled task proposal."""
+    bot = _active_bot
+    if bot is None:
+        return
+    admin_gid = (bot.config.admin_group_id or "").strip()
+    if not admin_gid:
+        return
+    from mose.task_decision import format_task_proposal_message
+
+    tz = getattr(getattr(bot, "agent", None), "config", None)
+    timezone = "UTC"
+    if tz is not None:
+        timezone = str(getattr(tz.scheduler, "timezone", "UTC"))
+    body = format_task_proposal_message(payload, timezone=timezone)
+    prompt = (
+        f"Scheduled task approval needed\n\n{body}\n\n"
+        f"Expires: {_format_ts(expires_at)} (UTC)"
+    )
+    try:
+        await bot._send_message(admin_gid, prompt)
+    except Exception:
+        logger.exception("signal_task_propose_send_failed", extra={"slug": slug})
+
+
+def _signal_group_for_recipient(bot: "MoseSignalBot", recipient: str) -> str | None:
+    recip = (recipient or "").strip().lower()
+    if recip == "signal:admin":
+        return (bot.config.admin_group_id or "").strip() or None
+    if recip == "signal:engagement":
+        return (bot.config.engagement_group_id or "").strip() or None
+    return None
+
+
+async def _signal_task_delivery(task: Any, recipient: str, body: str) -> None:
+    bot = _active_bot
+    if bot is None:
+        return
+    gid = _signal_group_for_recipient(bot, recipient)
+    if not gid:
+        return
+    slug = getattr(task, "slug", "task")
+    try:
+        await bot._send_message(gid, f"[scheduled:{slug}]\n\n{body}")
+    except Exception:
+        logger.exception("signal_task_delivery_failed", extra={"slug": slug, "recipient": recipient})
+
+
+async def _signal_task_failure(task: Any, message: str) -> None:
+    bot = _active_bot
+    if bot is None:
+        return
+    admin_gid = (bot.config.admin_group_id or "").strip()
+    if not admin_gid:
+        return
+    slug = getattr(task, "slug", "task")
+    try:
+        await bot._send_message(admin_gid, f"[scheduled:{slug} FAILURE]\n\n{message}")
+    except Exception:
+        logger.exception("signal_task_failure_failed", extra={"slug": slug})
+
+
 _APPROVE_VERBS = {"approve", "yes", "y"}
 _REJECT_VERBS = {"reject", "no", "n", "deny"}
 _CANCEL_VERBS = {"stop", "cancel", "abort", "halt"}
@@ -338,7 +402,7 @@ async def _handle_skill_approval_reply(bot: "MoseSignalBot", group_id: str, text
         if len(pending) != 1:
             await bot._send_message(
                 admin_gid,
-                f"{len(pending)} items pending approval (skills + trackers); please include the slug "
+                f"{len(pending)} items pending approval (skills, trackers, tasks); please include the slug "
                 f"(e.g. 'approve my-skill').",
             )
             return True
@@ -366,6 +430,20 @@ async def _handle_skill_approval_reply(bot: "MoseSignalBot", group_id: str, text
             await bot._send_message(
                 admin_gid,
                 f"No change for '{slug}' (duplicate tracker, wrong state, or unknown).",
+            )
+        return True
+
+    if row.kind in ("scheduled_task_proposal", "scheduled_task_deletion"):
+        from mose.task_decision import handle_task_decision
+
+        applied = await handle_task_decision(slug, approved=approved)
+        if applied:
+            verb = "approved" if approved else "rejected"
+            await bot._send_message(admin_gid, f"Scheduled task request '{slug}' {verb}.")
+        else:
+            await bot._send_message(
+                admin_gid,
+                f"No change for '{slug}' (duplicate task, wrong state, or unknown).",
             )
         return True
 
