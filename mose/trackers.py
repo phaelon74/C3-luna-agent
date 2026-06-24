@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable
 
 from mose.config import TrackersConfig
 from mose.memory import MemoryManager, TrackerRow
-from mose.observe import get_logger, log_event
+from mose.observe import get_logger, log_duration, log_event
 
 logger = get_logger("trackers")
 
@@ -73,6 +73,7 @@ class TrackerScheduler:
         self._tracker_tasks: dict[str, asyncio.Task[Any]] = {}
         self._lock = asyncio.Lock()
         self._last_errors: dict[str, str] = {}
+        self._snapshot_state: dict[str, dict[str, Any]] = {}
         self._stopped = asyncio.Event()
 
     async def start(self) -> None:
@@ -176,6 +177,52 @@ class TrackerScheduler:
                 pass
 
     async def _tick(self, tr: TrackerRow) -> None:
+        with log_duration(logger, "tracker_tick", slug=tr.slug):
+            await self._tick_body(tr)
+
+    def _numeric_metrics(self, metrics: dict[str, Any]) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for k, v in metrics.items():
+            try:
+                if isinstance(v, bool):
+                    continue
+                out[str(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def _should_store_full_snapshot(
+        self,
+        slug: str,
+        numeric_metrics: dict[str, float],
+        now: float,
+    ) -> bool:
+        interval = max(0, int(self.cfg.snapshot_interval_seconds))
+        if interval == 0:
+            return True
+        state = self._snapshot_state.get(slug)
+        if state is None:
+            return True
+        last_metrics = state.get("last_metrics") or {}
+        if last_metrics != numeric_metrics:
+            return True
+        last_at = float(state.get("last_full_snapshot_at") or 0)
+        return (now - last_at) >= interval
+
+    def _record_snapshot_state(
+        self,
+        slug: str,
+        numeric_metrics: dict[str, float],
+        now: float,
+        *,
+        stored_full: bool,
+    ) -> None:
+        state = self._snapshot_state.setdefault(slug, {})
+        state["last_metrics"] = dict(numeric_metrics)
+        if stored_full:
+            state["last_full_snapshot_at"] = now
+
+    async def _tick_body(self, tr: TrackerRow) -> None:
         try:
             raw = await self._run_collector(tr)
             data = _parse_collector_json(raw)
@@ -196,25 +243,24 @@ class TrackerScheduler:
             snapshot = {}
 
         now = time.time()
+        numeric_metrics = self._numeric_metrics(metrics)
+        store_full_snapshot = self._should_store_full_snapshot(tr.slug, numeric_metrics, now)
+        if not store_full_snapshot:
+            snapshot = []
+
         day_bucket = MemoryManager.utc_day_bucket(now)
         payload = {"metrics": metrics, "snapshot": snapshot, "ts": now}
 
         sample_id = self.memory.insert_tracker_sample(tr.id, now, payload)
+        self._record_snapshot_state(
+            tr.slug, numeric_metrics, now, stored_full=store_full_snapshot
+        )
         self.memory.update_tracker(
             tr.slug,
             last_run_at=now,
             last_status="ok",
             consecutive_failures=0,
         )
-
-        numeric_metrics: dict[str, float] = {}
-        for k, v in metrics.items():
-            try:
-                if isinstance(v, bool):
-                    continue
-                numeric_metrics[str(k)] = float(v)
-            except (TypeError, ValueError):
-                continue
 
         agg_specs = tr.aggregations
         if not agg_specs:

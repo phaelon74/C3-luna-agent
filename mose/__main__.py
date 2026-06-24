@@ -268,7 +268,7 @@ def _run_seed_tracker_cli(config, name: str) -> int:
                 "slug": "plex_streams",
                 "description": "Plex active sessions / transcodes (seeded)",
                 "collector_ref": default_plex_codemode_collector(),
-                "schedule_seconds": 300,
+                "schedule_seconds": config.trackers.default_schedule_seconds,
                 "aggregations": ["streams", "transcodes"],
                 "alert_rules": [
                     {
@@ -283,7 +283,7 @@ def _run_seed_tracker_cli(config, name: str) -> int:
                 "slug": "plex-cpu-monitor",
                 "description": "Plex host/process CPU and memory (latest resources sample)",
                 "collector_ref": default_plex_cpu_monitor_collector(),
-                "schedule_seconds": 300,
+                "schedule_seconds": config.trackers.default_schedule_seconds,
                 "aggregations": [
                     "host_cpu_pct",
                     "host_memory_pct",
@@ -296,7 +296,7 @@ def _run_seed_tracker_cli(config, name: str) -> int:
                 "slug": "plex-viewers",
                 "description": "Plex active viewers, transcodes, bandwidth, per-session snapshot",
                 "collector_ref": default_plex_viewers_collector(),
-                "schedule_seconds": 300,
+                "schedule_seconds": config.trackers.default_schedule_seconds,
                 "aggregations": ["viewers", "transcodes", "direct_plays", "total_bandwidth_mbps"],
                 "alert_rules": [],
             },
@@ -324,6 +324,7 @@ def _run_seed_tracker_cli(config, name: str) -> int:
 def _run_apply_plex_trackers_cli(config) -> int:
     """Patch plex-cpu-monitor and plex-viewers collectors from built-in templates."""
     memory = MemoryManager(config.memory)
+    schedule = config.trackers.default_schedule_seconds
     try:
         updates = [
             ("plex-cpu-monitor", default_plex_cpu_monitor_collector()),
@@ -339,13 +340,31 @@ def _run_apply_plex_trackers_cli(config) -> int:
                 slug,
                 collector_ref=ref,
                 collector_kind="codemode",
+                schedule_seconds=schedule,
                 consecutive_failures=0,
                 last_status=None,
                 enabled=True,
             )
             applied.append(slug)
-        print(json.dumps({"applied": applied, "missing": missing}, indent=2))
+        print(json.dumps({"applied": applied, "missing": missing, "schedule_seconds": schedule}, indent=2))
         return 0 if applied else (2 if missing else 1)
+    finally:
+        memory.close()
+
+
+def _run_apply_tracker_schedule_cli(config, seconds: int | None) -> int:
+    """Set schedule_seconds on all tracker rows."""
+    schedule = config.trackers.default_schedule_seconds if seconds is None else seconds
+    schedule = max(5, min(int(schedule), 86400))
+    memory = MemoryManager(config.memory)
+    try:
+        updated: list[dict[str, int | str]] = []
+        for t in memory.list_trackers(enabled_only=False):
+            before = t.schedule_seconds
+            memory.update_tracker(t.slug, schedule_seconds=schedule)
+            updated.append({"slug": t.slug, "before": before, "after": schedule})
+        print(json.dumps({"schedule_seconds": schedule, "updated": updated}, indent=2))
+        return 0
     finally:
         memory.close()
 
@@ -412,7 +431,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--apply-plex-trackers",
         action="store_true",
-        help="Update plex-cpu-monitor and plex-viewers collector_ref from built-in templates and exit.",
+        help="Update plex-cpu-monitor and plex-viewers collector_ref and schedule from built-in templates and exit.",
+    )
+    parser.add_argument(
+        "--apply-tracker-schedule",
+        nargs="?",
+        type=int,
+        const=-1,
+        default=None,
+        metavar="SECONDS",
+        help="Set schedule_seconds on all trackers (default: config default_schedule_seconds) and exit.",
     )
     parser.add_argument(
         "--tracker-run-now",
@@ -573,6 +601,11 @@ async def main() -> None:
     if args.apply_plex_trackers:
         log_event(logger, "apply_plex_trackers_cli")
         sys.exit(_run_apply_plex_trackers_cli(config))
+
+    if args.apply_tracker_schedule is not None:
+        sec = None if args.apply_tracker_schedule == -1 else args.apply_tracker_schedule
+        log_event(logger, "apply_tracker_schedule_cli", seconds=sec)
+        sys.exit(_run_apply_tracker_schedule_cli(config, sec))
 
     if args.tracker_run_now:
         print(

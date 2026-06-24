@@ -86,7 +86,7 @@ async def handle_tracker_decision(slug: str, *, approved: bool) -> bool:
             description=str(p.get("description") or tslug),
             collector_kind=str(p.get("collector_kind") or "codemode"),
             collector_ref=str(p.get("collector_ref") or ""),
-            schedule_seconds=int(p.get("schedule_seconds") or 300),
+            schedule_seconds=int(p.get("schedule_seconds") or 5),
             aggregations=p.get("aggregations"),
             alert_rules=p.get("alert_rules"),
             recipients=p.get("recipients"),

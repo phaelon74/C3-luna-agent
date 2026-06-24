@@ -103,8 +103,10 @@ Prefer this over delegate for coding work.
 3. Read the printed JSON. **If stdout is empty, your access was wrong — log ``sessions`` itself and try again.** Then write a second ``execute`` that walks the real shape and prints exactly what the user asked for.
 
 ### Trackers (scheduled collectors)
-- Tools: ``tracker_list`` (use ``include_collector: true`` to debug), ``tracker_query``, ``tracker_update``, ``tracker_run_now``, ``tracker_propose``.
+- Tools: ``tracker_list`` (use ``include_collector: true`` to debug), ``tracker_stats``, ``tracker_query``, ``tracker_update``, ``tracker_run_now``, ``tracker_propose``.
 - Collectors are TypeScript bodies that must ``console.log(JSON.stringify({{ metrics, snapshot }}))``.
+- Default poll interval is **5 seconds**. Use ``tracker_stats`` for min/max/avg over a time window; use ``tracker_query`` only for narrow windows or to load ``max_sample_id`` from stats for peak session detail.
+- Daily rollups (``*_daily_max``) use **UTC** calendar days — not local timezone.
 - Before writing or fixing Plex collectors, ``load_skill`` **codemode-collector-conventions** and **plex** (tracker section). Probe API shape first; do not assume MediaContainer for ``sessions_get_active``.
 - ``server_get_current_resources``: latest ``timestamp`` row from ``data[]`` only (values already 0–100%). ``sessions_get_active``: flat ``sessions`` + ``total_bitrate_kbps``; parse ``media_info.bitrate`` strings.
 
@@ -817,7 +819,7 @@ class Agent:
                     try:
                         self._tracker_compact_runs += 1
                         vacuum = self._tracker_compact_runs % 7 == 0
-                        self.memory.compact_tracker_storage(
+                        stats = self.memory.compact_tracker_storage(
                             sample_retention_days=self.config.trackers.sample_retention_days,
                             rollup_retention_days=self.config.trackers.rollup_retention_days,
                             vacuum=vacuum,
@@ -827,6 +829,7 @@ class Agent:
                             "tracker_compaction_done",
                             runs=self._tracker_compact_runs,
                             vacuum=vacuum,
+                            **stats,
                         )
                     except asyncio.CancelledError:
                         raise

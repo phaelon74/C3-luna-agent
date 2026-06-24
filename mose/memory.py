@@ -207,6 +207,7 @@ class MemoryManager:
         self.db = sqlite3.connect(str(db_path))
         self.db.enable_load_extension(True)
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA wal_autocheckpoint=1000")
         self.db.execute("PRAGMA foreign_keys=ON")
         sqlite_vec.load(self.db)
         self.db.enable_load_extension(False)
@@ -1019,6 +1020,77 @@ class MemoryManager:
             {"bucket": r[0], "metric": r[1], "value": r[2], "sample_id": r[3]}
             for r in self.db.execute(sql, params).fetchall()
         ]
+
+    def query_tracker_stats(
+        self,
+        slug: str,
+        *,
+        since: float | None = None,
+        until: float | None = None,
+        metrics: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate min/max/avg/count for metrics over a sample time range."""
+        tr = self.get_tracker(slug)
+        if tr is None:
+            return {"error": f"unknown tracker '{slug}'"}
+
+        metric_names: list[str] = list(metrics) if metrics else []
+        if not metric_names:
+            for item in tr.aggregations or []:
+                if isinstance(item, str):
+                    metric_names.append(item)
+                elif isinstance(item, dict) and item.get("metric"):
+                    metric_names.append(str(item["metric"]))
+
+        base_where = "tracker_id = ?"
+        params: list[Any] = [tr.id]
+        if since is not None:
+            base_where += " AND ts >= ?"
+            params.append(since)
+        if until is not None:
+            base_where += " AND ts <= ?"
+            params.append(until)
+
+        count_row = self.db.execute(
+            f"SELECT COUNT(*) FROM tracker_samples WHERE {base_where}",
+            params,
+        ).fetchone()
+        sample_count = int(count_row[0]) if count_row else 0
+
+        out_metrics: dict[str, Any] = {}
+        for m in metric_names:
+            path = f"$.metrics.{m}"
+            agg = self.db.execute(
+                f"SELECT MAX(CAST(json_extract(payload, ?) AS REAL)), "
+                f"MIN(CAST(json_extract(payload, ?) AS REAL)), "
+                f"AVG(CAST(json_extract(payload, ?) AS REAL)), "
+                f"COUNT(json_extract(payload, ?)) "
+                f"FROM tracker_samples WHERE {base_where} "
+                f"AND json_extract(payload, ?) IS NOT NULL",
+                [path, path, path, path, *params, path],
+            ).fetchone()
+            max_row = self.db.execute(
+                f"SELECT id, ts FROM tracker_samples WHERE {base_where} "
+                f"AND json_extract(payload, ?) IS NOT NULL "
+                f"ORDER BY CAST(json_extract(payload, ?) AS REAL) DESC LIMIT 1",
+                [*params, path, path],
+            ).fetchone()
+            out_metrics[m] = {
+                "max": float(agg[0]) if agg and agg[0] is not None else None,
+                "min": float(agg[1]) if agg and agg[1] is not None else None,
+                "avg": round(float(agg[2]), 4) if agg and agg[2] is not None else None,
+                "count": int(agg[3]) if agg and agg[3] is not None else 0,
+                "max_sample_id": int(max_row[0]) if max_row else None,
+                "max_ts": float(max_row[1]) if max_row else None,
+            }
+
+        return {
+            "slug": slug,
+            "since": since,
+            "until": until,
+            "sample_count": sample_count,
+            "metrics": out_metrics,
+        }
 
     def record_tracker_alert(
         self,

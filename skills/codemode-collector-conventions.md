@@ -56,6 +56,16 @@ Built-in collector: `default_plex_cpu_monitor_collector()` in `mose/trackers.py`
 
 Built-in collector: `default_plex_viewers_collector()` in `mose/trackers.py`.
 
+## Snapshot thinning (5s polling)
+
+Collectors still emit a full `snapshot` every tick. The scheduler stores it only when:
+
+- metrics changed since the previous tick, or
+- `snapshot_interval_seconds` elapsed (default 300s), or
+- first tick after startup.
+
+Other ticks persist `metrics` only (`snapshot: []`). Rollups and alerts always use live metrics. Use `tracker_query` on a sample with a non-empty snapshot for session detail at a peak.
+
 ## Fixing a live tracker
 
 - `tracker_list` with `include_collector: true` — read current `collector_ref`.

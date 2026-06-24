@@ -181,12 +181,14 @@ class TrackersConfig:
     """Scheduled data collection (trackers) and retention."""
 
     enabled: bool = True
-    sample_retention_days: int = 14
+    sample_retention_days: int = 90
     rollup_retention_days: int = 730
     reconcile_interval_seconds: int = 60
-    failure_threshold: int = 5
+    default_schedule_seconds: int = 5
+    snapshot_interval_seconds: int = 300
+    failure_threshold: int = 30
     default_recipient: str = "signal:admin"
-    compaction_interval_hours: int = 24
+    compaction_interval_hours: int = 6
     compaction_startup_delay_seconds: int = 120
     active_trackers_prompt_chars: int = 500
     active_trackers_max_lines: int = 12
@@ -333,6 +335,17 @@ def load_config(config_path: Path | None = None) -> Config:
             cfg.portal.approval_bridge_port = int(str(pp).strip())
         except ValueError:
             pass
+
+    if (trd := os.environ.get("TRACKERS_SAMPLE_RETENTION_DAYS")) is not None and str(trd).strip():
+        cfg.trackers.sample_retention_days = int(trd)
+    if (tds := os.environ.get("TRACKERS_DEFAULT_SCHEDULE_SECONDS")) is not None and str(tds).strip():
+        cfg.trackers.default_schedule_seconds = int(tds)
+    if (tsi := os.environ.get("TRACKERS_SNAPSHOT_INTERVAL_SECONDS")) is not None and str(tsi).strip():
+        cfg.trackers.snapshot_interval_seconds = int(tsi)
+    if (tft := os.environ.get("TRACKERS_FAILURE_THRESHOLD")) is not None and str(tft).strip():
+        cfg.trackers.failure_threshold = int(tft)
+    if (tci := os.environ.get("TRACKERS_COMPACTION_INTERVAL_HOURS")) is not None and str(tci).strip():
+        cfg.trackers.compaction_interval_hours = int(tci)
 
     cfg.signal.phone_number = (cfg.signal.phone_number or "").strip()
     cfg.signal.engagement_group_id = (cfg.signal.engagement_group_id or "").strip()

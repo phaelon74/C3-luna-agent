@@ -67,6 +67,17 @@ review_startup_delay_seconds = 300
 # they reply "stop <slug>" or "cancel <slug>". Default: 15 minutes.
 build_grace_window_seconds = 900
 
+[trackers]
+enabled = true
+sample_retention_days = 90
+rollup_retention_days = 730
+default_schedule_seconds = 5
+snapshot_interval_seconds = 300
+failure_threshold = 30
+compaction_interval_hours = 6
+reconcile_interval_seconds = 60
+code_timeout_seconds = 60
+
 [portal]
 # When enabled, mose-agent listens on approval_bridge_port for POST /approve (Code Mode mutating MCP).
 enabled = false

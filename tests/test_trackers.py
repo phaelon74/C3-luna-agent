@@ -185,3 +185,109 @@ def test_compact_tracker_storage(memory: MemoryManager) -> None:
     memory.insert_tracker_sample(tr.id, 1.0, {"metrics": {}})
     stats = memory.compact_tracker_storage(sample_retention_days=0, rollup_retention_days=0, vacuum=False)
     assert stats["deleted_samples"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_snapshot_thinning(memory: MemoryManager) -> None:
+    """Unchanged metrics between interval ticks store metrics only (empty snapshot)."""
+    cfg = TrackersConfig(snapshot_interval_seconds=999999)
+    state = {"streams": 1.0}
+
+    def collect() -> dict:
+        return {
+            "metrics": {"streams": state["streams"]},
+            "snapshot": [{"user": "alice", "title": "Show"}],
+        }
+
+    memory.create_tracker(
+        slug="thin",
+        description="thinning",
+        collector_kind="test",
+        collector_ref="x",
+        schedule_seconds=5,
+        alert_rules=[],
+    )
+    sch = TrackerScheduler(
+        memory,
+        cfg,
+        execute_codemode=_noop_codemode,
+        test_handlers={"thin": collect},
+    )
+    await sch.run_once("thin")
+    first = memory.query_tracker_samples("thin", limit=1)[0]
+    assert first["payload"]["snapshot"] == [{"user": "alice", "title": "Show"}]
+
+    await sch.run_once("thin")
+    second = memory.query_tracker_samples("thin", limit=1)[0]
+    assert second["payload"]["snapshot"] == []
+
+    state["streams"] = 2.0
+    await sch.run_once("thin")
+    third = memory.query_tracker_samples("thin", limit=1)[0]
+    assert third["payload"]["snapshot"] == [{"user": "alice", "title": "Show"}]
+
+
+def test_query_tracker_stats(memory: MemoryManager) -> None:
+    import time
+
+    memory.create_tracker(
+        slug="stats",
+        description="stats",
+        collector_kind="test",
+        collector_ref="x",
+        schedule_seconds=5,
+        aggregations=["viewers", "transcodes"],
+    )
+    tr = memory.get_tracker("stats")
+    assert tr is not None
+    base = time.time() - 100
+    memory.insert_tracker_sample(
+        tr.id, base + 10, {"metrics": {"viewers": 2.0, "transcodes": 0.0}, "snapshot": []}
+    )
+    memory.insert_tracker_sample(
+        tr.id, base + 20, {"metrics": {"viewers": 5.0, "transcodes": 1.0}, "snapshot": []}
+    )
+    memory.insert_tracker_sample(
+        tr.id, base + 30, {"metrics": {"viewers": 3.0, "transcodes": 1.0}, "snapshot": []}
+    )
+
+    out = memory.query_tracker_stats("stats", since=base, until=base + 60)
+    assert out["sample_count"] == 3
+    assert out["metrics"]["viewers"]["max"] == 5.0
+    assert out["metrics"]["viewers"]["min"] == 2.0
+    assert out["metrics"]["viewers"]["count"] == 3
+    assert out["metrics"]["transcodes"]["max"] == 1.0
+
+
+def test_apply_tracker_schedule_updates_all(memory: MemoryManager) -> None:
+    from mose.config import Config, MemoryConfig, TrackersConfig
+    from mose.__main__ import _run_apply_tracker_schedule_cli
+
+    db_path = memory.config.db_path
+    memory.create_tracker(
+        slug="sched-a",
+        description="a",
+        collector_kind="test",
+        collector_ref="x",
+        schedule_seconds=300,
+    )
+    memory.create_tracker(
+        slug="sched-b",
+        description="b",
+        collector_kind="test",
+        collector_ref="x",
+        schedule_seconds=60,
+    )
+    memory.close()
+
+    cfg = Config()
+    cfg.memory = MemoryConfig(db_path=db_path)
+    cfg.trackers = TrackersConfig(default_schedule_seconds=5)
+    assert _run_apply_tracker_schedule_cli(cfg, None) == 0
+
+    mm2 = MemoryManager(cfg.memory)
+    try:
+        assert mm2.get_tracker("sched-a").schedule_seconds == 5
+        assert mm2.get_tracker("sched-b").schedule_seconds == 5
+    finally:
+        mm2.close()

@@ -487,7 +487,7 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
                     },
                     "schedule_seconds": {
                         "type": "integer",
-                        "description": "Interval between samples (e.g. 300 for 5 minutes).",
+                        "description": "Interval between samples (e.g. 5 for 5 seconds).",
                     },
                     "aggregations": {
                         "type": "array",
@@ -499,7 +499,8 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
                         "description": (
                             "Rules as objects, e.g. "
                             "{\"id\":\"rec\",\"type\":\"new_daily_high\",\"metric\":\"streams_daily_max\","
-                            "\"lookback_days\":30} or threshold_above / threshold_below / delta_pct."
+                            "\"lookback_days\":30} or threshold_above / threshold_below / delta_pct "
+                            "(delta_pct compares the last two samples — at 5s polling that is a 5-second window)."
                         ),
                     },
                     "recipients": {
@@ -592,6 +593,31 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
                     "since_bucket": {"type": "string", "description": "YYYY-MM-DD inclusive."},
                     "until_bucket": {"type": "string", "description": "YYYY-MM-DD inclusive."},
                     "limit": {"type": "integer", "description": "Max samples (default 50)."},
+                },
+                "required": ["slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tracker_stats",
+            "description": (
+                "Aggregate min/max/avg/count for tracker metrics over a time window. "
+                "Prefer this over tracker_query for peaks when polling at 5s. "
+                "Returns max_sample_id/max_ts for fetching the peak snapshot via tracker_query."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string"},
+                    "since": {"type": "number", "description": "Unix epoch start (optional)."},
+                    "until": {"type": "number", "description": "Unix epoch end (optional)."},
+                    "metrics": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Metric keys (default: tracker aggregations).",
+                    },
                 },
                 "required": ["slug"],
             },
@@ -1497,7 +1523,8 @@ async def _tool_tracker_propose(args: dict, **kwargs) -> str:
                 "use collector_kind 'codemode' and mcp-portal__portal_codemode_execute."
             )
     try:
-        schedule_seconds = int(args.get("schedule_seconds") or 300)
+        default_sched = int(getattr(_tracker_config.trackers, "default_schedule_seconds", 5))
+        schedule_seconds = int(args.get("schedule_seconds") or default_sched)
     except (TypeError, ValueError):
         return "Error: schedule_seconds must be an integer."
     schedule_seconds = max(5, min(schedule_seconds, 86400))
@@ -1668,6 +1695,31 @@ async def _tool_tracker_query(args: dict, **kwargs) -> str:
     return json.dumps({"samples": samples, "rollups": rollups}, indent=2, default=str)
 
 
+async def _tool_tracker_stats(args: dict, **kwargs) -> str:
+    if _tracker_memory is None:
+        return "Error: tracker subsystem not initialized."
+    slug = str(args.get("slug") or "").strip()
+    if not slug:
+        return "Error: slug is required."
+    since = args.get("since")
+    until = args.get("until")
+    try:
+        since_f = float(since) if since is not None else None
+        until_f = float(until) if until is not None else None
+    except (TypeError, ValueError):
+        return "Error: since/until must be numbers."
+    metrics_arg = args.get("metrics")
+    metrics: list[str] | None = None
+    if metrics_arg is not None:
+        if not isinstance(metrics_arg, list):
+            return "Error: metrics must be a list of strings."
+        metrics = [str(m) for m in metrics_arg if m is not None and str(m).strip()]
+    stats = _tracker_memory.query_tracker_stats(
+        slug, since=since_f, until=until_f, metrics=metrics
+    )
+    return json.dumps(stats, indent=2, default=str)
+
+
 async def _tool_tracker_pause(args: dict, **kwargs) -> str:
     if _tracker_memory is None:
         return "Error: tracker subsystem not initialized."
@@ -1725,6 +1777,7 @@ _TOOL_REGISTRY: dict[str, Any] = {
     "tracker_list": _tool_tracker_list,
     "tracker_update": _tool_tracker_update,
     "tracker_query": _tool_tracker_query,
+    "tracker_stats": _tool_tracker_stats,
     "tracker_pause": _tool_tracker_pause,
     "tracker_resume": _tool_tracker_resume,
     "tracker_run_now": _tool_tracker_run_now,

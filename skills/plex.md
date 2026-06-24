@@ -89,6 +89,8 @@ Scheduled trackers use the same Code Mode path but must `console.log` `{"metrics
 
 **Bandwidth:** `total_bandwidth_mbps = total_bitrate_kbps / 1024`. Per-session `media_info.bitrate` is `"NNNN kbps"` (parse digits).
 
+**Polling:** default 5s (`schedule_seconds=5`). Full session snapshots are stored every 5 minutes or when viewer/transcode counts change; metrics are stored every tick.
+
 **Deploy fix on host:** `docker compose exec mose-agent python -m mose --apply-plex-trackers`
 
 **Probe script:** `scripts/plex_tracker_probe.py` (run inside `mose-agent`).
