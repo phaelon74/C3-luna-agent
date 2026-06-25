@@ -268,9 +268,28 @@ def build_sonarr_app(c: ArrClient) -> FastMCP:
         return json_response(c.get_json("/episodefile", params or None))
 
     @tool()
-    def sonarr_get_series() -> str:
-        """GET /series — all series in the library (response can be large). Match ``title`` / ``sortTitle`` to find ``id``, then use ``sonarr_get_episode`` and ``sonarr_post_command_episode_search``."""
-        return json_response(c.get_json("/series"))
+    def sonarr_delete_episodefile(id: int) -> str:
+        """DELETE /episodefile/{id}. Removes on-disk file and unlinks from episode. Requires approval."""
+        return json_response(c.delete_json(f"/episodefile/{id}"))
+
+    @tool()
+    def sonarr_get_series(
+        tvdbId: int | None = None,
+        includeSeasonImages: bool | None = None,
+    ) -> str:
+        """GET /series — your Sonarr library.
+
+        With ``tvdbId``: fast server-side library lookup (preferred).
+        With no params: full library dump (slow on large libraries; output may truncate at 20KB).
+        For a single Sonarr internal id use ``sonarr_get_series_by_id``.
+        For title-only metadata (TVDB) use ``sonarr_get_series_lookup``, then re-check library by ``tvdbId``.
+        """
+        params: dict[str, Any] = {}
+        if tvdbId is not None:
+            params["tvdbId"] = tvdbId
+        if includeSeasonImages is not None:
+            params["includeSeasonImages"] = includeSeasonImages
+        return json_response(c.get_json("/series", params or None))
 
     @tool()
     def sonarr_get_series_by_id(id: int) -> str:
@@ -282,7 +301,7 @@ def build_sonarr_app(c: ArrClient) -> FastMCP:
 
     @tool()
     def sonarr_get_series_lookup(term: str) -> str:
-        """GET /series/lookup — metadata search by title (Sonarr indexer/metadata; not your library list). Use to resolve a show name to ``tvdbId`` / canonical title, then match to a library ``id`` from ``sonarr_get_series`` or ``sonarr_get_series_by_id``."""
+        """GET /series/lookup — metadata search by title (Sonarr indexer/metadata; not your library list). Use to resolve a show name to ``tvdbId`` / canonical title, then match to a library entry from ``sonarr_get_series`` with ``tvdbId`` or ``sonarr_get_series_by_id``."""
         return _get_series_lookup(c, term)
 
     @tool()

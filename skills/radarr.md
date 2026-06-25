@@ -5,6 +5,7 @@ Mose reaches Radarr **only** through the MCP portal (Code Mode), not `bash`/`cur
 ## When to use
 
 - Check whether a movie is **in your Radarr library** (vs only on TMDB)
+- Check **movie audio language** or file metadata
 - Add a movie, trigger a missing-movie search, or troubleshoot queue/import
 - Distinguish **Missing** (monitored, no file yet) from **not in library**
 
@@ -30,6 +31,7 @@ Mose reaches Radarr **only** through the MCP portal (Code Mode), not `bash`/`cur
 2. In library with `hasFile: false` / status missing → `radarr_trigger_search({ movieId })` or check queue — **do not** add again.
 3. `radarr_add_movie` returns 400 → re-check library by `tmdbId`; do **not** conclude "not in library".
 4. Title only → `radarr_get_movie_lookup({ term })` to get `tmdbId`, then library-check before add.
+5. Audio language → `radarr_get_movie({ tmdbId })` → `radarr_get_movie_files({ movieId })` → `mediaInfo.audioLanguages` (not Plex `media_get_details`).
 
 ## Read-only examples
 
@@ -57,6 +59,21 @@ if (Array.isArray(lib) && lib.length > 0) {
 } else {
   // radarr_add_movie via plex_stack_automation — requires approval
 }
+```
+
+### Movie audio language (preferred over Plex for *arr-managed movies)
+
+```ts
+const lookup = await mcp.radarr_diagnostics.radarr_get_movie_lookup({ term: "Movie Title" });
+const tmdbId = lookup[0]?.tmdbId;
+const lib = await mcp.radarr_diagnostics.radarr_get_movie({ tmdbId });
+const movieId = lib[0]?.id;
+const files = await mcp.radarr_diagnostics.radarr_get_movie_files({ movieId });
+console.log(JSON.stringify(files.map(f => ({
+  path: f.path,
+  audioLanguages: f.mediaInfo?.audioLanguages,
+  audioCodec: f.mediaInfo?.audioCodec,
+})), null, 2));
 ```
 
 ### Health and system status

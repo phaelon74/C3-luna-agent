@@ -127,6 +127,19 @@ Prefer this over delegate for coding work.
    ``console.log(JSON.stringify(sessions, null, 2));``
 3. Read the printed JSON. **If stdout is empty, your access was wrong — log ``sessions`` itself and try again.** Then write a second ``execute`` that walks the real shape and prints exactly what the user asked for.
 
+### Worked example — answer "is show X in Sonarr?"
+1. ``portal_codemode_search`` with ``query="sonarr series tvdbId"``.
+2. ``portal_codemode_execute``:
+   ``const lookup = await mcp.sonarr_diagnostics.sonarr_get_series_lookup({{ term: "Show Name" }});``
+   ``const tvdbId = lookup[0]?.tvdbId;``
+   ``const lib = await mcp.sonarr_diagnostics.sonarr_get_series({{ tvdbId }});``
+   ``console.log(JSON.stringify(lib, null, 2));``
+3. Non-empty ``lib`` → in library. **Never** conclude "not in library" from ``sonarr_get_series_lookup`` alone (that is TVDB metadata, not your library).
+
+### Audio language (*arr-managed content)
+- **TV episodes** → Sonarr ``sonarr_get_episode_files`` → ``mediaInfo.audioLanguages`` — not Plex ``media_get_details``.
+- **Movies** → Radarr ``radarr_get_movie_files`` → ``mediaInfo.audioLanguages`` — not Plex ``media_get_details``.
+
 ### Trackers (scheduled collectors)
 - Tools: ``tracker_list`` (use ``include_collector: true`` to debug), ``tracker_stats``, ``tracker_query``, ``tracker_update``, ``tracker_run_now``, ``tracker_propose``.
 - Collectors are TypeScript bodies that must ``console.log(JSON.stringify({{ metrics, snapshot }}))``.

@@ -101,6 +101,70 @@ def test_movie_lookup_passes_term_param() -> None:
     assert client.last_params == {"term": "Sheep Detectives"}
 
 
+def test_sonarr_get_series_passes_tvdb_id_param() -> None:
+    import json as _json
+
+    from arr_diagnostics.sonarr_mcp import build_sonarr_app
+
+    class _C:
+        def __init__(self) -> None:
+            self.last_path: str | None = None
+            self.last_params: dict[str, object] | None = None
+
+        def get_json(self, path: str, params: dict[str, object] | None = None) -> object:
+            self.last_path = path
+            self.last_params = params or {}
+            return [{"title": "Dutton Ranch", "tvdbId": 456789}]
+
+        def delete_json(self, *_a: object, **_k: object) -> object:
+            raise AssertionError("not used")
+
+        def post_json(self, *_a: object, **_k: object) -> object:
+            raise AssertionError("not used")
+
+        def post_empty(self, *_a: object, **_k: object) -> object:
+            raise AssertionError("not used")
+
+    client = _C()
+    mcp = build_sonarr_app(client)  # type: ignore[arg-type]
+    tool_fn = next(t for t in mcp._tool_manager._tools.values() if t.name == "sonarr_get_series")  # noqa: SLF001
+    out = tool_fn.fn(tvdbId=456789)
+    data = _json.loads(out)
+    assert data[0]["title"] == "Dutton Ranch"
+    assert client.last_path == "/series"
+    assert client.last_params == {"tvdbId": 456789}
+
+
+def test_sonarr_delete_episodefile_deletes_by_id() -> None:
+    import json as _json
+
+    from arr_diagnostics.sonarr_mcp import build_sonarr_app
+
+    class _C:
+        def __init__(self) -> None:
+            self.last_path: str | None = None
+
+        def get_json(self, *_a: object, **_k: object) -> object:
+            raise AssertionError("not used")
+
+        def delete_json(self, path: str) -> object:
+            self.last_path = path
+            return {}
+
+        def post_json(self, *_a: object, **_k: object) -> object:
+            raise AssertionError("not used")
+
+        def post_empty(self, *_a: object, **_k: object) -> object:
+            raise AssertionError("not used")
+
+    client = _C()
+    mcp = build_sonarr_app(client)  # type: ignore[arg-type]
+    tool_fn = next(t for t in mcp._tool_manager._tools.values() if t.name == "sonarr_delete_episodefile")  # noqa: SLF001
+    out = tool_fn.fn(id=42)
+    assert _json.loads(out) == {}
+    assert client.last_path == "/episodefile/42"
+
+
 def test_post_episode_search_posts_episode_ids() -> None:
     import json as _json
 

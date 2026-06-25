@@ -52,6 +52,19 @@ const logs = await mcp.plex_ops_admin.server_get_plex_logs({});
 console.log(JSON.stringify(logs, null, 2));
 ```
 
+## Audio / subtitle language
+
+Plex MCP tools (`media_get_details`, `get_media_details`) do **not** reliably expose per-stream audio language in documented response shapes. Do not report "can't determine language" without trying the *arr path first.
+
+| Content | Preferred backend | Tool chain |
+|---------|-------------------|------------|
+| **TV episodes** | Sonarr | `sonarr_get_series_lookup` → `sonarr_get_series({ tvdbId })` → `sonarr_get_episode_files({ seriesId })` → `mediaInfo.audioLanguages` |
+| **Movies** | Radarr | `radarr_get_movie_lookup` → `radarr_get_movie({ tmdbId })` → `radarr_get_movie_files({ movieId })` → `mediaInfo.audioLanguages` |
+
+For almost all Plex TV/movies in this stack, content is Sonarr/Radarr-managed — use *arr `mediaInfo` first (`load_skill sonarr` / `load_skill radarr`).
+
+Only fall back to probing Plex `media_get_details` for unmanaged Plex-only content (see `scripts/plex_media_probe.py`).
+
 ## Mutations (admin approval)
 
 Scan, refresh, butler tasks, session stop, etc. are **not** on the read allowlist — they trigger the normal portal mutation approval flow.

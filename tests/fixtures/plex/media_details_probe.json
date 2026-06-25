@@ -1,0 +1,13 @@
+{
+  "_comment": "Placeholder until scripts/plex_media_probe.py is run on the homelab. vladimir-tutin Plex MCP media_get_details returns title/duration/summary metadata; per-stream audio language is not in the normalized JSON agents should parse. Prefer Sonarr sonarr_get_episode_files or Radarr radarr_get_movie_files mediaInfo.audioLanguages for *arr-managed content.",
+  "source": "documented_gap",
+  "preferred_audio_paths": {
+    "tv": "mcp.sonarr_diagnostics.sonarr_get_episode_files → mediaInfo.audioLanguages",
+    "movies": "mcp.radarr_diagnostics.radarr_get_movie_files → mediaInfo.audioLanguages"
+  },
+  "plex_media_get_details": {
+    "audio_language_reliable": false,
+    "fields_typically_present": ["title", "duration", "summary", "year", "contentRating"],
+    "fields_not_documented": ["audioLanguages", "audioStream", "stream language"]
+  }
+}

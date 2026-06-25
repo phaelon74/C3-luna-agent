@@ -57,3 +57,4 @@ API keys exist only in MCP sidecar environments. Do not reference `$PLEX_TOKEN`,
 |-------|-----|
 | **purge-queue-samples** | List and remove Sonarr/Radarr queue rows that are sample-only downloads (Code Mode; `load_skill` for full runbook). |
 | **purge-queue-empty** | List and remove Sonarr/Radarr queue rows with zero/empty downloads (Code Mode; `load_skill` for full runbook). |
+| **sonarr-replace-episodes** | Delete wrong episode files and trigger `EpisodeSearch` for specific episodes (wrong language, bad quality). |
