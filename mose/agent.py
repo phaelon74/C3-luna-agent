@@ -138,6 +138,7 @@ Prefer this over delegate for coding work.
    ``console.log(JSON.stringify({{ inLibrary: lib?.length > 0, seriesId, episodeFileCount: files?.length }}, null, 2));``
 3. Non-empty ``lib`` → in library. **Never** conclude "not in library" from ``sonarr_get_series_lookup`` alone (that is TVDB metadata, not your library).
 4. **Never** report file counts from lookup ``statistics`` (always zero). Use ``sonarr_get_episode_files`` or ``sonarr_get_episode`` ``hasFile`` before saying episodes are missing.
+5. **Never** call ``sonarr_post_command_refresh_series`` or ``sonarr_post_command_rescan_series`` unless the user explicitly asked to refresh/rescan. Misread lookup stats are not missing files — re-query episode files instead.
 
 ### Audio language (*arr-managed content)
 - **TV episodes** → Sonarr ``sonarr_get_episode_files`` → ``mediaInfo.audioLanguages`` — not Plex ``media_get_details``.

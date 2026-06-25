@@ -21,7 +21,7 @@ def _prepend_arr_path() -> None:
 def test_sonarr_command_allowlist_length() -> None:
     from arr_diagnostics.sonarr_mcp import SONARR_COMMANDS
 
-    assert len(SONARR_COMMANDS) == 6
+    assert len(SONARR_COMMANDS) == 4
 
 
 def test_post_episode_search_requires_ids() -> None:

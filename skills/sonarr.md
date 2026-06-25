@@ -35,7 +35,8 @@ Mose reaches Sonarr **only** through the MCP portal (Code Mode), not `bash`/`cur
 4. In library with missing episodes → `sonarr_post_command_episode_search({ episodeIds })` — **do not** add the series again.
 5. Audio language → `sonarr_get_episode_files({ seriesId })` → `mediaInfo.audioLanguages` (not Plex `media_get_details`).
 6. Replace wrong file → `sonarr_delete_episodefile({ id })` then `sonarr_post_command_episode_search({ episodeIds })` — see `load_skill sonarr-replace-episodes`.
-7. Files on disk but `hasFile: false` / zero episode files → `sonarr_post_command_refresh_series({ seriesId })` then `sonarr_post_command_rescan_series({ seriesId })` (approval).
+
+**Do not** call `sonarr_post_command_refresh_series` or `sonarr_post_command_rescan_series` unless the user **explicitly** asks to refresh/rescan. Wrong lookup `statistics` are not a reason to refresh — re-check `sonarr_get_episode_files` first.
 
 ## Read-only examples
 
@@ -155,21 +156,11 @@ Episode search, delete episode files, queue import, deletes, etc. require portal
 
 See `load_skill sonarr-replace-episodes` for the full delete-then-search runbook.
 
-### Refresh and rescan series (approval required)
-
-When files exist on disk but Sonarr has not linked them, or after manual imports:
-
-```ts
-// await mcp.sonarr_diagnostics.sonarr_post_command_refresh_series({ seriesId: SERIES_ID });
-// await mcp.sonarr_diagnostics.sonarr_post_command_rescan_series({ seriesId: SERIES_ID });
-```
-
-Do **not** use parameterless `sonarr_command_RefreshSeries` / `sonarr_command_RescanSeries` — they lack `seriesId` and affect the whole library.
-
 ## Caveats
 
 - **Metadata lookup ≠ library** — `sonarr_get_series_lookup` returns TVDB results; absence there does not mean absent from your library.
-- **Lookup `statistics` are always zero** — never report "no files" or "0% downloaded" from lookup; verify with `sonarr_get_episode_files` / `sonarr_get_episode`.
+- **Lookup `statistics` are always zero** — never report "no files" or "0% downloaded" from lookup; verify with `sonarr_get_episode_files` / `sonarr_get_episode`. If episode files exist, **do not** refresh or rescan the series.
+- **Never proactive refresh/rescan** — `sonarr_post_command_refresh_series` / `sonarr_post_command_rescan_series` only when the user explicitly requests it.
 - **hasFile: true ≠ correct language** — a downloaded episode may be the wrong audio track; check `mediaInfo.audioLanguages` on episode files.
 - Full-library `sonarr_get_series({})` can truncate at 20KB on large libraries — use `tvdbId` for single-title checks.
 - **400 on add** usually means duplicate — confirm with `sonarr_get_series({ tvdbId })`.

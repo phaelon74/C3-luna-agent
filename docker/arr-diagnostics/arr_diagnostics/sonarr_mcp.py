@@ -12,8 +12,6 @@ from arr_diagnostics.sonarr_manual_import import manual_import_commit
 
 SONARR_COMMANDS = frozenset({
     "ManualImport",
-    "RescanSeries",
-    "RefreshSeries",
     "DownloadedEpisodesScan",
     "RssSync",
     "RefreshMonitoredDownloads",
@@ -223,12 +221,19 @@ def build_sonarr_app(c: ArrClient) -> FastMCP:
 
     @tool()
     def sonarr_post_command_refresh_series(seriesId: int) -> str:
-        """POST /command ``RefreshSeries`` for one library series (metadata refresh). Pass ``seriesId`` from ``sonarr_get_series`` / ``sonarr_get_series_by_id``. Requires approval."""
+        """POST /command ``RefreshSeries`` for one library series (metadata refresh).
+
+        **Only when the user explicitly asks** to refresh/rescan a series — never as a fix for
+        misread lookup statistics or before verifying ``sonarr_get_episode_files``. Requires approval.
+        """
         return _post_series_command(c, "RefreshSeries", seriesId)
 
     @tool()
     def sonarr_post_command_rescan_series(seriesId: int) -> str:
-        """POST /command ``RescanSeries`` for one library series (disk scan / link files on disk). Use after manual downloads or when episodes exist on disk but ``hasFile`` is false. Requires approval."""
+        """POST /command ``RescanSeries`` for one library series (disk scan).
+
+        **Only when the user explicitly asks** to rescan a series — never proactively. Requires approval.
+        """
         return _post_series_command(c, "RescanSeries", seriesId)
 
     for _cmd in sorted(SONARR_COMMANDS):
