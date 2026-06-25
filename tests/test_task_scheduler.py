@@ -13,6 +13,7 @@ from mose.schedule import compute_next_run
 from mose.task_decision import (
     SCHEDULED_TASK_DELETION_KIND,
     SCHEDULED_TASK_PROPOSAL_KIND,
+    SCHEDULED_TASK_UPDATE_KIND,
     handle_task_decision,
     init_task_decision_runtime,
 )
@@ -91,6 +92,62 @@ async def test_task_approval_creates_row(memory: MemoryManager) -> None:
     task = memory.get_scheduled_task("morning-check")
     assert task is not None
     assert task.next_run_at > 0
+
+
+@pytest.mark.asyncio
+async def test_task_update_approval(memory: MemoryManager) -> None:
+    memory.create_scheduled_task(
+        slug="purge-radarr",
+        description="Old description",
+        recurrence={"frequency": "daily", "hour": 4, "minute": 0},
+        user_prompt="Old prompt",
+        execution_plan={
+            "procedure": "Old procedure",
+            "allowed_tools": ["mcp-portal__portal_codemode_execute"],
+        },
+        recipients=["log_only"],
+        next_run_at=1.0,
+    )
+    new_plan = {
+        "procedure": "Probe manual import for importPending rows",
+        "allowed_tools": [
+            "mcp-portal__portal_codemode_execute",
+            "mcp-radarr_diagnostics__radarr_delete_queue_item",
+        ],
+        "codemode_scripts": [{"purpose": "purge", "code": "// stage 2 probe"}],
+    }
+    memory.save_pending_approval(
+        slug="task-upd-purge-radarr",
+        kind=SCHEDULED_TASK_UPDATE_KIND,
+        recipient="cli",
+        proposal_path="",
+        payload={
+            "target_slug": "purge-radarr",
+            "updates": {
+                "description": "Radarr queue purge",
+                "user_prompt": "Purge empty and sample queue rows",
+                "execution_plan": new_plan,
+            },
+            "before": {
+                "description": "Old description",
+                "user_prompt": "Old prompt",
+                "execution_plan": {
+                    "procedure": "Old procedure",
+                    "allowed_tools": ["mcp-portal__portal_codemode_execute"],
+                },
+            },
+        },
+        expires_at=9_999_999_999.0,
+    )
+    init_task_decision_runtime(memory=memory, get_scheduler=lambda: None, timezone="UTC")
+    ok = await handle_task_decision("task-upd-purge-radarr", approved=True)
+    assert ok
+    task = memory.get_scheduled_task("purge-radarr")
+    assert task is not None
+    assert task.description == "Radarr queue purge"
+    assert task.user_prompt == "Purge empty and sample queue rows"
+    assert task.execution_plan["procedure"] == new_plan["procedure"]
+    assert "radarr_delete_queue_item" in task.execution_plan["allowed_tools"][1]
 
 
 @pytest.mark.asyncio

@@ -780,6 +780,52 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "scheduled_task_update_propose",
+            "description": (
+                "Propose updating an existing scheduled task in place (human must approve). "
+                "Use when changing procedure, codemode scripts, schedule, prompt, or recipients "
+                "without deleting and recreating the task. Provide only fields to change."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_slug": {
+                        "type": "string",
+                        "description": "Existing scheduled task slug to update.",
+                    },
+                    "description": {"type": "string", "description": "New task description."},
+                    "recurrence": {
+                        "type": "object",
+                        "description": "New schedule (same shape as scheduled_task_propose).",
+                    },
+                    "user_prompt": {
+                        "type": "string",
+                        "description": "New prompt sent when the task fires.",
+                    },
+                    "system_addendum": {
+                        "type": "string",
+                        "description": "New extra system instructions for scheduled runs.",
+                    },
+                    "execution_plan": {
+                        "type": "object",
+                        "description": (
+                            "Replacement execution plan: procedure, allowed_tools, "
+                            "optional codemode_scripts, max_tool_rounds."
+                        ),
+                    },
+                    "recipients": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "signal:admin, signal:engagement, or log_only",
+                    },
+                },
+                "required": ["target_slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "scheduled_task_delete_propose",
             "description": "Propose deleting a scheduled task (requires human approval).",
             "parameters": {
@@ -2016,6 +2062,92 @@ async def _tool_scheduled_task_propose(args: dict, **kwargs) -> str:
     )
 
 
+async def _tool_scheduled_task_update_propose(args: dict, **kwargs) -> str:
+    from mose.schedule import RecurrenceError, validate_recurrence
+    from mose.task_decision import SCHEDULED_TASK_UPDATE_KIND, notify_task_proposal
+
+    if _scheduled_task_memory is None or _scheduled_task_config is None:
+        return "Error: scheduled task subsystem not initialized."
+    target = str(args.get("target_slug") or "").strip()
+    if not _VALID_TRACKER_SLUG.match(target):
+        return "Error: target_slug must be kebab-case."
+    current = _scheduled_task_memory.get_scheduled_task(target)
+    if current is None:
+        return f"Error: no scheduled task named '{target}'."
+    updates: dict[str, Any] = {}
+    before: dict[str, Any] = {}
+    if "description" in args and args["description"] is not None:
+        desc = str(args["description"]).strip()
+        if not desc:
+            return "Error: description must be non-empty when provided."
+        updates["description"] = desc
+        before["description"] = current.description
+    if "user_prompt" in args and args["user_prompt"] is not None:
+        user_prompt = str(args["user_prompt"]).strip()
+        if not user_prompt:
+            return "Error: user_prompt must be non-empty when provided."
+        updates["user_prompt"] = user_prompt
+        before["user_prompt"] = current.user_prompt
+    if "system_addendum" in args:
+        updates["system_addendum"] = args["system_addendum"]
+        before["system_addendum"] = current.system_addendum
+    if "recurrence" in args and args["recurrence"] is not None:
+        try:
+            recurrence = validate_recurrence(args["recurrence"])
+        except RecurrenceError as e:
+            return f"Error: {e}"
+        updates["recurrence"] = recurrence
+        before["recurrence"] = current.recurrence
+    if "execution_plan" in args and args["execution_plan"] is not None:
+        plan = args["execution_plan"]
+        if not isinstance(plan, dict):
+            return "Error: execution_plan must be an object."
+        allowed = plan.get("allowed_tools")
+        if not isinstance(allowed, list) or not allowed:
+            return "Error: execution_plan.allowed_tools must be a non-empty list."
+        procedure = str(plan.get("procedure") or "").strip()
+        if not procedure:
+            return "Error: execution_plan.procedure is required."
+        updates["execution_plan"] = plan
+        before["execution_plan"] = current.execution_plan
+    if "recipients" in args and args["recipients"] is not None:
+        recips = args["recipients"]
+        if not isinstance(recips, list):
+            return "Error: recipients must be a list."
+        updates["recipients"] = recips
+        before["recipients"] = current.recipients
+    if not updates:
+        return (
+            "Error: provide at least one field to update: description, recurrence, "
+            "user_prompt, system_addendum, execution_plan, recipients."
+        )
+    pending_slug = f"task-upd-{target}"
+    recipient = str(getattr(_scheduled_task_config.signal, "admin_group_id", "") or "").strip() or "cli"
+    expires_at = time.time() + int(
+        getattr(_scheduled_task_config.signal, "proposal_timeout_seconds", 43200)
+    )
+    payload = {
+        "target_slug": target,
+        "pending_slug": pending_slug,
+        "description": f"Update scheduled task {target}",
+        "updates": updates,
+        "before": before,
+    }
+    _scheduled_task_memory.save_pending_approval(
+        slug=pending_slug,
+        kind=SCHEDULED_TASK_UPDATE_KIND,
+        recipient=recipient,
+        proposal_path="",
+        payload=payload,
+        expires_at=expires_at,
+    )
+    await notify_task_proposal(pending_slug, payload, expires_at)
+    return (
+        f"Update proposal '{pending_slug}' recorded for task '{target}'. "
+        "Awaiting admin approval (approve <pending_slug> in Signal or python -m mose --decide <pending_slug> y)."
+    )
+
+
 async def _tool_scheduled_task_delete_propose(args: dict, **kwargs) -> str:
     from mose.task_decision import SCHEDULED_TASK_DELETION_KIND, notify_task_proposal
 
@@ -2141,6 +2273,7 @@ _TOOL_REGISTRY: dict[str, Any] = {
     "tracker_resume": _tool_tracker_resume,
     "tracker_run_now": _tool_tracker_run_now,
     "scheduled_task_propose": _tool_scheduled_task_propose,
+    "scheduled_task_update_propose": _tool_scheduled_task_update_propose,
     "scheduled_task_delete_propose": _tool_scheduled_task_delete_propose,
     "scheduled_task_list": _tool_scheduled_task_list,
     "scheduled_task_pause": _tool_scheduled_task_pause,

@@ -525,7 +525,11 @@ async def _run_decide_once(config, slug: str, decision: str) -> int:
         return 0 if applied else 1
 
     row = memory.get_pending_approval(slug)
-    if row is not None and row.kind in ("scheduled_task_proposal", "scheduled_task_deletion"):
+    if row is not None and row.kind in (
+        "scheduled_task_proposal",
+        "scheduled_task_deletion",
+        "scheduled_task_update",
+    ):
         init_task_decision_runtime(
             memory=memory,
             get_scheduler=lambda: None,

@@ -18,6 +18,7 @@ logger = get_logger("task_decision")
 
 SCHEDULED_TASK_PROPOSAL_KIND = "scheduled_task_proposal"
 SCHEDULED_TASK_DELETION_KIND = "scheduled_task_deletion"
+SCHEDULED_TASK_UPDATE_KIND = "scheduled_task_update"
 
 _runtime: dict[str, Any] = {}
 
@@ -75,6 +76,66 @@ def format_task_proposal_message(payload: dict[str, Any], *, timezone: str) -> s
     )
 
 
+def _format_field_change(key: str, before: Any, after: Any, *, timezone: str) -> str:
+    if key == "recurrence":
+        try:
+            b = format_recurrence_human(before or {}, timezone)
+            a = format_recurrence_human(after or {}, timezone)
+        except RecurrenceError:
+            b, a = str(before), str(after)
+        return f"  {key}:\n    - was: {b}\n    + now: {a}"
+    if key == "execution_plan":
+        b_plan = before if isinstance(before, dict) else {}
+        a_plan = after if isinstance(after, dict) else {}
+        b_proc = b_plan.get("procedure") or "(none)"
+        a_proc = a_plan.get("procedure") or "(none)"
+        b_tools = ", ".join(str(t) for t in (b_plan.get("allowed_tools") or [])) or "(none)"
+        a_tools = ", ".join(str(t) for t in (a_plan.get("allowed_tools") or [])) or "(none)"
+        lines = [f"  {key}:"]
+        if b_proc != a_proc:
+            lines.append(f"    procedure:\n      - was: {b_proc}\n      + now: {a_proc}")
+        if b_tools != a_tools:
+            lines.append(f"    allowed_tools:\n      - was: {b_tools}\n      + now: {a_tools}")
+        b_scripts = b_plan.get("codemode_scripts") or []
+        a_scripts = a_plan.get("codemode_scripts") or []
+        if b_scripts != a_scripts:
+            lines.append("    codemode_scripts: (changed)")
+        if len(lines) == 1:
+            lines.append("    (no visible diff)")
+        return "\n".join(lines)
+    if key == "recipients":
+        b = ", ".join(str(r) for r in (before or [])) or "(none)"
+        a = ", ".join(str(r) for r in (after or [])) or "(none)"
+        return f"  {key}:\n    - was: {b}\n    + now: {a}"
+    b = str(before) if before is not None else "(none)"
+    a = str(after) if after is not None else "(none)"
+    if len(b) > 200:
+        b = b[:200] + "..."
+    if len(a) > 200:
+        a = a[:200] + "..."
+    return f"  {key}:\n    - was: {b}\n    + now: {a}"
+
+
+def format_task_update_message(payload: dict[str, Any], *, timezone: str) -> str:
+    """Rich admin notification for a scheduled task update proposal."""
+    target = payload.get("target_slug") or "?"
+    updates = payload.get("updates") or {}
+    before = payload.get("before") or {}
+    change_lines = [
+        _format_field_change(k, before.get(k), updates.get(k), timezone=timezone)
+        for k in updates
+    ]
+    changes_block = "\n".join(change_lines) if change_lines else "  (none)"
+    pending_slug = payload.get("pending_slug") or f"task-upd-{target}"
+    return (
+        f"Scheduled task update: {target}\n"
+        f"Description: {payload.get('description') or f'Update {target}'}\n\n"
+        f"Changes:\n{changes_block}\n\n"
+        f"Approve: approve {pending_slug}\n"
+        f"Reject: reject {pending_slug}"
+    )
+
+
 def format_task_recovery_message(
     memory: MemoryManager,
     *,
@@ -87,7 +148,11 @@ def format_task_recovery_message(
     task_p = [
         p
         for p in pending
-        if p.kind in (SCHEDULED_TASK_PROPOSAL_KIND, SCHEDULED_TASK_DELETION_KIND)
+        if p.kind in (
+            SCHEDULED_TASK_PROPOSAL_KIND,
+            SCHEDULED_TASK_DELETION_KIND,
+            SCHEDULED_TASK_UPDATE_KIND,
+        )
     ]
     degraded = memory.list_scheduled_tasks_degraded()
     lines: list[str] = []
@@ -116,7 +181,11 @@ async def handle_task_decision(slug: str, *, approved: bool) -> bool:
     row = mem.get_pending_approval(slug)
     if row is None or row.status != "pending":
         return False
-    if row.kind not in (SCHEDULED_TASK_PROPOSAL_KIND, SCHEDULED_TASK_DELETION_KIND):
+    if row.kind not in (
+        SCHEDULED_TASK_PROPOSAL_KIND,
+        SCHEDULED_TASK_DELETION_KIND,
+        SCHEDULED_TASK_UPDATE_KIND,
+    ):
         return False
 
     if not approved:
@@ -129,6 +198,45 @@ async def handle_task_decision(slug: str, *, approved: bool) -> bool:
         mem.delete_scheduled_task(str(target))
         mem.decide_pending_approval(slug, approved=True)
         log_event(logger, "scheduled_task_deleted_via_approval", pending_slug=slug, target=target)
+    elif row.kind == SCHEDULED_TASK_UPDATE_KIND:
+        p = row.payload or {}
+        target = str(p.get("target_slug") or "")
+        if not target or mem.get_scheduled_task(target) is None:
+            log_event(logger, "scheduled_task_update_missing_target", slug=slug, target=target)
+            return False
+        updates = p.get("updates") or {}
+        if not updates:
+            log_event(logger, "scheduled_task_update_empty", slug=slug, target=target)
+            return False
+        fields: dict[str, Any] = {}
+        if "description" in updates:
+            fields["description"] = str(updates["description"])
+        if "user_prompt" in updates:
+            fields["user_prompt"] = str(updates["user_prompt"])
+        if "system_addendum" in updates:
+            fields["system_addendum"] = updates["system_addendum"]
+        if "execution_plan" in updates:
+            plan = updates["execution_plan"]
+            if not isinstance(plan, dict) or not plan.get("allowed_tools"):
+                log_event(logger, "scheduled_task_update_missing_plan", slug=slug, target=target)
+                return False
+            fields["execution_plan"] = plan
+        if "recipients" in updates:
+            fields["recipients"] = updates["recipients"]
+        if "recurrence" in updates:
+            try:
+                recurrence = validate_recurrence(updates["recurrence"])
+            except RecurrenceError:
+                log_event(logger, "scheduled_task_update_invalid_recurrence", slug=slug, target=target)
+                return False
+            fields["recurrence"] = recurrence
+            fields["next_run_at"] = compute_next_run(recurrence, tz, after=time.time())
+        if not fields:
+            log_event(logger, "scheduled_task_update_no_fields", slug=slug, target=target)
+            return False
+        mem.update_scheduled_task(target, **fields)
+        mem.decide_pending_approval(slug, approved=True)
+        log_event(logger, "scheduled_task_updated_via_approval", pending_slug=slug, target=target)
     else:
         p = row.payload or {}
         tslug = str(p.get("task_slug") or slug)
@@ -179,3 +287,10 @@ async def notify_task_proposal(slug: str, payload: dict[str, Any], expires_at: f
             await ret
     except Exception:
         logger.exception("task_propose_callback failed", extra={"slug": slug})
+
+
+def format_task_notification_body(payload: dict[str, Any], *, timezone: str) -> str:
+    """Pick the right admin message body for create vs update proposals."""
+    if payload.get("updates") and payload.get("target_slug"):
+        return format_task_update_message(payload, timezone=timezone)
+    return format_task_proposal_message(payload, timezone=timezone)

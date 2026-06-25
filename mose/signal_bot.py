@@ -252,15 +252,17 @@ async def _signal_task_propose_callback(
     admin_gid = (bot.config.admin_group_id or "").strip()
     if not admin_gid:
         return
-    from mose.task_decision import format_task_proposal_message
+    from mose.task_decision import format_task_notification_body
 
     tz = getattr(getattr(bot, "agent", None), "config", None)
     timezone = "UTC"
     if tz is not None:
         timezone = str(getattr(tz.scheduler, "timezone", "UTC"))
-    body = format_task_proposal_message(payload, timezone=timezone)
+    body = format_task_notification_body(payload, timezone=timezone)
+    is_update = bool(payload.get("updates") and payload.get("target_slug"))
+    header = "Scheduled task update approval needed" if is_update else "Scheduled task approval needed"
     prompt = (
-        f"Scheduled task approval needed\n\n{body}\n\n"
+        f"{header}\n\n{body}\n\n"
         f"Expires: {_format_ts(expires_at)} (UTC)"
     )
     try:
@@ -433,7 +435,7 @@ async def _handle_skill_approval_reply(bot: "MoseSignalBot", group_id: str, text
             )
         return True
 
-    if row.kind in ("scheduled_task_proposal", "scheduled_task_deletion"):
+    if row.kind in ("scheduled_task_proposal", "scheduled_task_deletion", "scheduled_task_update"):
         from mose.task_decision import handle_task_decision
 
         applied = await handle_task_decision(slug, approved=approved)

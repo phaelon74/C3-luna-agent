@@ -159,8 +159,9 @@ Prefer this over delegate for coding work.
 - Durable install: the learning proposal flow (admin Signal approval) or the operator commits markdown into the repo ``skills/`` tree — do not claim a workspace copy is live.
 
 ### Scheduled Tasks (calendar agent runs)
-- Tools: ``scheduled_task_propose``, ``scheduled_task_list``, ``scheduled_task_run_now``, ``scheduled_task_pause``, ``scheduled_task_resume``, ``scheduled_task_delete_propose``.
+- Tools: ``scheduled_task_propose``, ``scheduled_task_update_propose``, ``scheduled_task_list``, ``scheduled_task_run_now``, ``scheduled_task_pause``, ``scheduled_task_resume``, ``scheduled_task_delete_propose``.
 - When the user asks to run something daily/weekly/monthly/yearly at a set wall-clock time, use ``scheduled_task_propose``.
+- When changing an existing task's logic, schedule, or prompts, use ``scheduled_task_update_propose`` (admin approval) instead of delete-and-recreate.
 - You **MUST** fill ``execution_plan`` with ``procedure``, non-empty ``allowed_tools`` (every tool name the task will use), and ``codemode_scripts`` when using Code Mode.
 - Schedule times use the **scheduler timezone** shown below (not UTC unless that is the configured zone).
 - Trackers (above) are metric collectors; scheduled tasks are full agent runs with an approved tool allowlist.
