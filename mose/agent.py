@@ -133,8 +133,11 @@ Prefer this over delegate for coding work.
    ``const lookup = await mcp.sonarr_diagnostics.sonarr_get_series_lookup({{ term: "Show Name" }});``
    ``const tvdbId = lookup[0]?.tvdbId;``
    ``const lib = await mcp.sonarr_diagnostics.sonarr_get_series({{ tvdbId }});``
-   ``console.log(JSON.stringify(lib, null, 2));``
+   ``const seriesId = lib[0]?.id;``
+   ``const files = await mcp.sonarr_diagnostics.sonarr_get_episode_files({{ seriesId }});``
+   ``console.log(JSON.stringify({{ inLibrary: lib?.length > 0, seriesId, episodeFileCount: files?.length }}, null, 2));``
 3. Non-empty ``lib`` → in library. **Never** conclude "not in library" from ``sonarr_get_series_lookup`` alone (that is TVDB metadata, not your library).
+4. **Never** report file counts from lookup ``statistics`` (always zero). Use ``sonarr_get_episode_files`` or ``sonarr_get_episode`` ``hasFile`` before saying episodes are missing.
 
 ### Audio language (*arr-managed content)
 - **TV episodes** → Sonarr ``sonarr_get_episode_files`` → ``mediaInfo.audioLanguages`` — not Plex ``media_get_details``.

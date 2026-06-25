@@ -22,9 +22,13 @@ if (!Array.isArray(lib) || lib.length === 0) {
 } else {
   console.log("SERIES", lib[0].id, lib[0].title, lib[0].path);
 }
+const seriesId = lib[0]?.id;
+const files = await mcp.sonarr_diagnostics.sonarr_get_episode_files({ seriesId });
+console.log("EPISODE_FILES", files.length);
 ```
 
 **Never** conclude "not in library" from lookup alone — always call `sonarr_get_series({ tvdbId })`.
+**Never** report zero files from lookup `statistics` — verify with `sonarr_get_episode_files` or `sonarr_get_episode` `hasFile`.
 
 ### 2. Get episode row IDs for target episodes
 

@@ -184,6 +184,38 @@ def test_post_episode_search_posts_episode_ids() -> None:
     assert client.last_body == {"name": "EpisodeSearch", "episodeIds": [10, 20]}
 
 
+def test_post_series_command_requires_series_id() -> None:
+    import json as _json
+
+    from arr_diagnostics.sonarr_mcp import _post_series_command
+
+    class _C:
+        def post_json(self, *_a: object, **_k: object) -> object:
+            raise AssertionError("should not POST without series id")
+
+    out = _post_series_command(_C(), "RefreshSeries", 0)  # type: ignore[arg-type]
+    assert _json.loads(out)["error"] == "seriesId_required"
+
+
+def test_post_series_command_posts_series_id() -> None:
+    import json as _json
+
+    from arr_diagnostics.sonarr_mcp import _post_series_command
+
+    class _C:
+        def __init__(self) -> None:
+            self.last_body: object | None = None
+
+        def post_json(self, path: str, body: object | None = None) -> object:
+            self.last_body = body
+            return {"id": 2, "name": "RescanSeries"}
+
+    client = _C()
+    out = _post_series_command(client, "RescanSeries", 2705)  # type: ignore[arg-type]
+    assert _json.loads(out)["name"] == "RescanSeries"
+    assert client.last_body == {"name": "RescanSeries", "seriesId": 2705}
+
+
 def test_radarr_command_allowlist_length() -> None:
     from arr_diagnostics.radarr_mcp import RADARR_COMMANDS
 

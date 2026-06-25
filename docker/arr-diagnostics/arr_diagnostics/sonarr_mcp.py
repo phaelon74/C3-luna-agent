@@ -58,6 +58,16 @@ def _post_episode_search_command(client: ArrClient, episode_ids: list[int]) -> s
     return json_response(client.post_json("/command", {"name": "EpisodeSearch", "episodeIds": episode_ids}))
 
 
+def _post_series_command(client: ArrClient, name: str, series_id: int) -> str:
+    """POST ``RefreshSeries`` / ``RescanSeries`` for one library series id."""
+    if series_id <= 0:
+        return json.dumps({
+            "error": "seriesId_required",
+            "detail": "Pass the Sonarr library series id from sonarr_get_series or sonarr_get_series_by_id.",
+        })
+    return json_response(client.post_json("/command", {"name": name, "seriesId": series_id}))
+
+
 def _get_series_lookup(client: ArrClient, term: str) -> str:
     """GET ``/series/lookup`` with ``term`` (whitespace-stripped)."""
     t = term.strip()
@@ -211,6 +221,16 @@ def build_sonarr_app(c: ArrClient) -> FastMCP:
         """POST /command ``EpisodeSearch`` for **specific Sonarr episode row ids only** (from ``sonarr_get_episode`` / ``sonarr_get_episode_by_id``). A parameterless ``EpisodeSearch`` in Sonarr searches *all* missing monitored episodes; that path is not exposed here on purpose. Requires approval."""
         return _post_episode_search_command(c, episodeIds)
 
+    @tool()
+    def sonarr_post_command_refresh_series(seriesId: int) -> str:
+        """POST /command ``RefreshSeries`` for one library series (metadata refresh). Pass ``seriesId`` from ``sonarr_get_series`` / ``sonarr_get_series_by_id``. Requires approval."""
+        return _post_series_command(c, "RefreshSeries", seriesId)
+
+    @tool()
+    def sonarr_post_command_rescan_series(seriesId: int) -> str:
+        """POST /command ``RescanSeries`` for one library series (disk scan / link files on disk). Use after manual downloads or when episodes exist on disk but ``hasFile`` is false. Requires approval."""
+        return _post_series_command(c, "RescanSeries", seriesId)
+
     for _cmd in sorted(SONARR_COMMANDS):
         mcp.tool(name=f"sonarr_command_{_cmd}")(_command_tool(_cmd))
 
@@ -301,7 +321,12 @@ def build_sonarr_app(c: ArrClient) -> FastMCP:
 
     @tool()
     def sonarr_get_series_lookup(term: str) -> str:
-        """GET /series/lookup — metadata search by title (Sonarr indexer/metadata; not your library list). Use to resolve a show name to ``tvdbId`` / canonical title, then match to a library entry from ``sonarr_get_series`` with ``tvdbId`` or ``sonarr_get_series_by_id``."""
+        """GET /series/lookup — metadata search by title (TVDB; **not** your library list).
+
+        ``statistics`` on lookup results are **not populated** (always zero) — never use them for file counts.
+        Use to resolve a show name to ``tvdbId``, then ``sonarr_get_series({ tvdbId })`` and verify files via
+        ``sonarr_get_episode`` / ``sonarr_get_episode_files``.
+        """
         return _get_series_lookup(c, term)
 
     @tool()

@@ -29,11 +29,13 @@ Mose reaches Sonarr **only** through the MCP portal (Code Mode), not `bash`/`cur
 
 ## Decision tree
 
-1. Have TVDB ID → `sonarr_get_series({ tvdbId })` first.
+1. Have TVDB ID → `sonarr_get_series({ tvdbId })` first, then `sonarr_get_series_by_id({ id })` for full detail.
 2. Title only → `sonarr_get_series_lookup({ term })` to get `tvdbId`, then library-check with `sonarr_get_series({ tvdbId })`.
-3. In library with missing episodes → `sonarr_post_command_episode_search({ episodeIds })` — **do not** add the series again.
-4. Audio language → `sonarr_get_episode_files({ seriesId })` → `mediaInfo.audioLanguages` (not Plex `media_get_details`).
-5. Replace wrong file → `sonarr_delete_episodefile({ id })` then `sonarr_post_command_episode_search({ episodeIds })` — see `load_skill sonarr-replace-episodes`.
+3. **Verify files** → `sonarr_get_episode_files({ seriesId })` or `sonarr_get_episode({ seriesId, seasonNumber })` and count `hasFile: true`. **Never** report file counts from `sonarr_get_series_lookup` — its `statistics` are always zero.
+4. In library with missing episodes → `sonarr_post_command_episode_search({ episodeIds })` — **do not** add the series again.
+5. Audio language → `sonarr_get_episode_files({ seriesId })` → `mediaInfo.audioLanguages` (not Plex `media_get_details`).
+6. Replace wrong file → `sonarr_delete_episodefile({ id })` then `sonarr_post_command_episode_search({ episodeIds })` — see `load_skill sonarr-replace-episodes`.
+7. Files on disk but `hasFile: false` / zero episode files → `sonarr_post_command_refresh_series({ seriesId })` then `sonarr_post_command_rescan_series({ seriesId })` (approval).
 
 ## Read-only examples
 
@@ -48,7 +50,28 @@ const tvdbId = lookup[0]?.tvdbId;
 
 const lib = await mcp.sonarr_diagnostics.sonarr_get_series({ tvdbId });
 console.log(JSON.stringify(lib, null, 2));
-// Non-empty array → in library. Check statistics / episode counts for missing vs downloaded.
+// Non-empty array → in library. Do NOT use lookup statistics for file counts.
+```
+
+### Verify episode files (required before reporting missing files)
+
+```ts
+const SERIES_ID = lib[0]?.id; // from sonarr_get_series — NOT from lookup
+const detail = await mcp.sonarr_diagnostics.sonarr_get_series_by_id({ id: SERIES_ID });
+const files = await mcp.sonarr_diagnostics.sonarr_get_episode_files({ seriesId: SERIES_ID });
+const episodes = await mcp.sonarr_diagnostics.sonarr_get_episode({
+  seriesId: SERIES_ID,
+  seasonNumber: 1,
+});
+const hasFileCount = episodes.filter(e => e.hasFile).length;
+console.log(JSON.stringify({
+  seriesId: SERIES_ID,
+  episodeFileCount: files.length,
+  hasFileCount,
+  totalEpisodes: episodes.length,
+  statistics: detail.statistics,
+}, null, 2));
+// Trust files.length and hasFileCount — not sonarr_get_series_lookup statistics.
 ```
 
 ### Episode audio language (preferred over Plex for *arr-managed TV)
@@ -132,9 +155,21 @@ Episode search, delete episode files, queue import, deletes, etc. require portal
 
 See `load_skill sonarr-replace-episodes` for the full delete-then-search runbook.
 
+### Refresh and rescan series (approval required)
+
+When files exist on disk but Sonarr has not linked them, or after manual imports:
+
+```ts
+// await mcp.sonarr_diagnostics.sonarr_post_command_refresh_series({ seriesId: SERIES_ID });
+// await mcp.sonarr_diagnostics.sonarr_post_command_rescan_series({ seriesId: SERIES_ID });
+```
+
+Do **not** use parameterless `sonarr_command_RefreshSeries` / `sonarr_command_RescanSeries` — they lack `seriesId` and affect the whole library.
+
 ## Caveats
 
 - **Metadata lookup ≠ library** — `sonarr_get_series_lookup` returns TVDB results; absence there does not mean absent from your library.
+- **Lookup `statistics` are always zero** — never report "no files" or "0% downloaded" from lookup; verify with `sonarr_get_episode_files` / `sonarr_get_episode`.
 - **hasFile: true ≠ correct language** — a downloaded episode may be the wrong audio track; check `mediaInfo.audioLanguages` on episode files.
 - Full-library `sonarr_get_series({})` can truncate at 20KB on large libraries — use `tvdbId` for single-title checks.
 - **400 on add** usually means duplicate — confirm with `sonarr_get_series({ tvdbId })`.
