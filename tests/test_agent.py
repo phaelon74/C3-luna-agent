@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
-from mose.config import Config, LearningConfig
+from mose.config import Config, LearningConfig, MemoryConfig
 from mose.llm import LLMClient, LLMResponse, ToolCall
-from mose.agent import Agent, _build_system_prompt, _load_skills
+from mose.agent import Agent, _build_system_prompt, _format_pending_approvals_block, _load_skills
 from mose.tools import verify_tool_result as _verify_tool_result
 from mose.memory import MemoryResult, MemoryManager
 
@@ -25,6 +25,33 @@ class TestSystemPrompt:
         assert "workspace/skills" in prompt
         assert "skills_path" in prompt
         assert "write_file" in prompt
+        assert "pending_approvals_list" in prompt
+        assert "skill_proposal_get" in prompt
+
+    def test_pending_approvals_block_in_prompt(self, tmp_path):
+        mem = MemoryManager(MemoryConfig(
+            db_path=str(tmp_path / "memory.db"),
+            embedding_model="nomic-ai/nomic-embed-text-v1.5",
+            embedding_dimensions=384,
+        ))
+        mem.search = MagicMock(return_value=[])
+        mem.save_pending_approval(
+            slug="radarr-sonarr-queue-purge-validation",
+            kind="skill_proposal",
+            recipient="signal:admin",
+            proposal_path="",
+            payload={"title": "Two-Stage Queue Purge"},
+            expires_at=1_800_000_000.0,
+        )
+        block = _format_pending_approvals_block(mem)
+        assert "radarr-sonarr-queue-purge-validation" in block
+        assert "Two-Stage Queue Purge" in block
+        prompt = _build_system_prompt(
+            [], None, "2026-01-01T00:00:00Z",
+            pending_approvals_section=block + "\n\n",
+        )
+        assert "Pending Approvals" in prompt
+        assert "radarr-sonarr-queue-purge-validation" in prompt
 
     def test_with_memories(self):
         memories = [

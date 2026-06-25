@@ -146,6 +146,7 @@ Prefer this over delegate for coding work.
 
 ### Trackers (scheduled collectors)
 - Tools: ``tracker_list`` (use ``include_collector: true`` to debug), ``tracker_stats``, ``tracker_query``, ``tracker_update``, ``tracker_run_now``, ``tracker_propose``.
+- ``tracker_list`` shows **active** trackers only — not pending tracker proposals. Use ``pending_approvals_list`` for proposals awaiting admin approval.
 - Collectors are TypeScript bodies that must ``console.log(JSON.stringify({{ metrics, snapshot }}))``.
 - Default poll interval is **5 seconds**. Use ``tracker_stats`` for min/max/avg over a time window; use ``tracker_query`` only for narrow windows or to load ``max_sample_id`` from stats for peak session detail.
 - Daily rollups (``*_daily_max``) use **UTC** calendar days — not local timezone.
@@ -157,9 +158,12 @@ Prefer this over delegate for coding work.
 - ``write_file`` only writes inside the workspace; it **cannot** install a production skill file.
 - When the user asks to create or document a skill: ``load_skill`` **sonarr**, **radarr**, and **_overview** as needed; reuse the **actual** ``portal_codemode_execute`` TypeScript from the task — never substitute ``bash``/``find``/``ls`` on download paths or ``curl`` to *arr APIs.
 - Durable install: the learning proposal flow (admin Signal approval) or the operator commits markdown into the repo ``skills/`` tree — do not claim a workspace copy is live.
+- Tools: ``pending_approvals_list``, ``skill_proposal_get``. Pending skill proposals are **not** visible via ``scheduled_task_list`` or ``tracker_list``.
+- You can list and describe pending skill proposals but **cannot** approve them. Tell the admin to reply ``approve <slug>`` on Signal (or ``python -m mose --decide <slug> y`` on the host).
 
 ### Scheduled Tasks (calendar agent runs)
 - Tools: ``scheduled_task_propose``, ``scheduled_task_update_propose``, ``scheduled_task_list``, ``scheduled_task_run_now``, ``scheduled_task_pause``, ``scheduled_task_resume``, ``scheduled_task_delete_propose``.
+- ``scheduled_task_list`` shows **active** tasks only — not pending task proposals. Use ``pending_approvals_list`` for proposals awaiting admin approval.
 - When the user asks to run something daily/weekly/monthly/yearly at a set wall-clock time, use ``scheduled_task_propose``.
 - When changing an existing task's logic, schedule, or prompts, use ``scheduled_task_update_propose`` (admin approval) instead of delete-and-recreate.
 - You **MUST** fill ``execution_plan`` with ``procedure``, non-empty ``allowed_tools`` (every tool name the task will use), and ``codemode_scripts`` when using Code Mode.
@@ -200,7 +204,7 @@ previously learned facts. Not all retrieved memories will be relevant — use ju
 
 {memory_section}
 {summary_section}
-{trackers_section}
+{trackers_section}{pending_approvals_section}
 Current time (UTC): {current_time}{local_time_line}
 Workspace: {workspace}"""
 
@@ -292,6 +296,32 @@ def _format_active_trackers_block(memory: MemoryManager, trackers_cfg: Any) -> s
     return text
 
 
+def _format_pending_approvals_block(memory: MemoryManager) -> str:
+    """Compact list of pending admin approvals for the system prompt (size-capped)."""
+    rows = memory.list_pending_approvals(status="pending")
+    if not rows:
+        return ""
+    from datetime import datetime, timezone
+
+    max_lines = 5
+    max_chars = 400
+    lines: list[str] = ["## Pending Approvals (awaiting admin)"]
+    for row in rows[:max_lines]:
+        payload = row.payload or {}
+        title = str(payload.get("title") or row.slug)[:60]
+        try:
+            exp = datetime.fromtimestamp(row.expires_at, tz=timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+        except (OSError, OverflowError, ValueError):
+            exp = "?"
+        lines.append(f"- {row.kind}: {row.slug} — {title} (expires {exp})")
+    if len(rows) > max_lines:
+        lines.append(f"- … and {len(rows) - max_lines} more (use pending_approvals_list)")
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = text[: max_chars - 3] + "..."
+    return text
+
+
 def _build_system_prompt(
     memories: list,
     summary: str | None,
@@ -300,6 +330,7 @@ def _build_system_prompt(
     skills_path: str = "",
     learning: LearningConfig | None = None,
     trackers_section: str = "",
+    pending_approvals_section: str = "",
     local_time_line: str = "",
     extra_section: str = "",
 ) -> str:
@@ -327,6 +358,7 @@ def _build_system_prompt(
         memory_section=memory_section,
         summary_section=summary_section,
         trackers_section=trackers_section,
+        pending_approvals_section=pending_approvals_section,
         skills_section=skills_section,
         current_time=current_time,
         local_time_line=local_time_line,
@@ -505,6 +537,10 @@ class Agent:
             tb = _format_active_trackers_block(self.memory, self.config.trackers)
             if tb:
                 trackers_section = tb + "\n\n"
+        pending_approvals_section = ""
+        pa = _format_pending_approvals_block(self.memory)
+        if pa:
+            pending_approvals_section = pa + "\n\n"
         overrides = _get_process_overrides()
         extra_section = str(overrides.get("system_addendum") or "").strip()
         if extra_section:
@@ -515,6 +551,7 @@ class Agent:
             self.config.agent.skills_path,
             learning=self.config.learning,
             trackers_section=trackers_section,
+            pending_approvals_section=pending_approvals_section,
             local_time_line=local_time_line,
             extra_section=extra_section,
         )

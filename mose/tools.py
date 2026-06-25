@@ -887,6 +887,52 @@ NATIVE_TOOLS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "pending_approvals_list",
+            "description": (
+                "List proposals awaiting human admin approval (skill, tracker, scheduled task). "
+                "Read-only — you cannot approve or reject. "
+                "Use when asked about pending proposals; do not infer from tracker_list or scheduled_task_list."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "description": (
+                            "Optional filter: skill_proposal, tracker_proposal, tracker_deletion, "
+                            "scheduled_task_proposal, scheduled_task_update, scheduled_task_deletion."
+                        ),
+                    },
+                    "include_payload": {
+                        "type": "boolean",
+                        "description": (
+                            "If true, include rationale and tool_trace_count for skill proposals."
+                        ),
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "skill_proposal_get",
+            "description": (
+                "Read full details of a pending skill proposal by slug. "
+                "Read-only — approval requires the admin to reply on Signal."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "slug": {"type": "string", "description": "Skill proposal slug (kebab-case)."},
+                },
+                "required": ["slug"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "sre_execute",
             "description": (
                 "Execute a command that modifies system state (restart, update, delete, etc.). "
@@ -2249,6 +2295,111 @@ async def _tool_scheduled_task_run_now(args: dict, **kwargs) -> str:
     return await sch.run_once(slug)
 
 
+_APPROVAL_KINDS = frozenset({
+    "skill_proposal",
+    "tracker_proposal",
+    "tracker_deletion",
+    "scheduled_task_proposal",
+    "scheduled_task_update",
+    "scheduled_task_deletion",
+})
+
+
+def _get_approvals_memory() -> Any | None:
+    """Shared MemoryManager used by tracker and scheduled-task subsystems."""
+    return _tracker_memory or _scheduled_task_memory
+
+
+def _format_approval_timestamp(ts: float) -> str:
+    from datetime import datetime, timezone
+
+    try:
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%MZ")
+    except (OSError, OverflowError, ValueError):
+        return "?"
+
+
+def _approval_row_summary(row: Any, *, include_payload: bool = False) -> dict[str, Any]:
+    payload = row.payload or {}
+    item: dict[str, Any] = {
+        "slug": row.slug,
+        "kind": row.kind,
+        "title": str(payload.get("title") or ""),
+        "description": str(payload.get("description") or "")[:200],
+        "expires_at": _format_approval_timestamp(row.expires_at),
+        "created_at": _format_approval_timestamp(row.created_at),
+        "proposal_path": row.proposal_path or "",
+    }
+    if include_payload:
+        rationale = payload.get("rationale")
+        if rationale:
+            item["rationale"] = str(rationale)[:500]
+        if row.kind == "skill_proposal" and row.proposal_path:
+            try:
+                proposal_file = Path(row.proposal_path)
+                if proposal_file.is_file():
+                    data = json.loads(proposal_file.read_text(encoding="utf-8"))
+                    trace = data.get("tool_trace")
+                    if isinstance(trace, list):
+                        item["tool_trace_count"] = len(trace)
+            except (OSError, json.JSONDecodeError, TypeError):
+                pass
+    return item
+
+
+async def _tool_pending_approvals_list(args: dict, **kwargs) -> str:
+    memory = _get_approvals_memory()
+    if memory is None:
+        return "Error: approvals subsystem not initialized."
+    kind = str(args.get("kind") or "").strip()
+    if kind and kind not in _APPROVAL_KINDS:
+        valid = ", ".join(sorted(_APPROVAL_KINDS))
+        return f"Error: unknown kind '{kind}'. Valid kinds: {valid}."
+    include_payload = bool(args.get("include_payload", False))
+    rows = memory.list_pending_approvals(kind=kind or None, status="pending")
+    out = [_approval_row_summary(row, include_payload=include_payload) for row in rows]
+    return json.dumps(out, indent=2)
+
+
+async def _tool_skill_proposal_get(args: dict, **kwargs) -> str:
+    memory = _get_approvals_memory()
+    if memory is None:
+        return "Error: approvals subsystem not initialized."
+    slug = str(args.get("slug") or "").strip()
+    if not slug:
+        return "Error: slug is required."
+    row = memory.get_pending_approval(slug)
+    if row is None or row.status != "pending":
+        return f"Error: no pending skill proposal found for '{slug}'."
+    if row.kind != "skill_proposal":
+        return (
+            f"Error: '{slug}' is a pending {row.kind}, not a skill proposal. "
+            "Use pending_approvals_list."
+        )
+    payload = row.payload or {}
+    result: dict[str, Any] = {
+        "slug": row.slug,
+        "kind": row.kind,
+        "status": row.status,
+        "title": str(payload.get("title") or ""),
+        "description": str(payload.get("description") or ""),
+        "rationale": str(payload.get("rationale") or ""),
+        "expires_at": _format_approval_timestamp(row.expires_at),
+        "proposal_path": row.proposal_path or "",
+    }
+    if row.proposal_path:
+        try:
+            proposal_file = Path(row.proposal_path)
+            if proposal_file.is_file():
+                data = json.loads(proposal_file.read_text(encoding="utf-8"))
+                trace = data.get("tool_trace")
+                if isinstance(trace, list):
+                    result["tool_trace_count"] = len(trace)
+        except (OSError, json.JSONDecodeError, TypeError) as e:
+            result["file_read_error"] = str(e)
+    return json.dumps(result, indent=2)
+
+
 # --- Registry ---
 
 _TOOL_REGISTRY: dict[str, Any] = {
@@ -2279,4 +2430,6 @@ _TOOL_REGISTRY: dict[str, Any] = {
     "scheduled_task_pause": _tool_scheduled_task_pause,
     "scheduled_task_resume": _tool_scheduled_task_resume,
     "scheduled_task_run_now": _tool_scheduled_task_run_now,
+    "pending_approvals_list": _tool_pending_approvals_list,
+    "skill_proposal_get": _tool_skill_proposal_get,
 }
