@@ -291,3 +291,29 @@ def test_apply_tracker_schedule_updates_all(memory: MemoryManager) -> None:
         assert mm2.get_tracker("sched-b").schedule_seconds == 5
     finally:
         mm2.close()
+
+
+def test_unwrap_codemode_raises_on_infrastructure_error() -> None:
+    from mose.trackers import unwrap_codemode_portal_response
+
+    with pytest.raises(RuntimeError, match="Blocked:"):
+        unwrap_codemode_portal_response("Blocked: tool 'bash' is not in the approved scheduled task allowlist.")
+
+
+def test_parse_collector_json_last_object_with_debug_lines() -> None:
+    from mose.trackers import parse_collector_json
+
+    stdout = (
+        "typeof object\n"
+        '{"status":"success"}\n'
+        '{"metrics":{"viewers":2},"snapshot":[]}\n'
+    )
+    parsed = parse_collector_json(stdout)
+    assert parsed["metrics"]["viewers"] == 2
+
+
+def test_parse_collector_json_preview_on_failure() -> None:
+    from mose.trackers import parse_collector_json
+
+    with pytest.raises(ValueError, match="preview:"):
+        parse_collector_json("not json at all")

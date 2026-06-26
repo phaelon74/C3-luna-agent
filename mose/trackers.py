@@ -24,6 +24,66 @@ def init_tracker_alert_callback(callback: TrackerAlertCallback | None) -> None:
     _tracker_alert_callback = callback
 
 
+def unwrap_codemode_portal_response(text: str) -> str:
+    """Extract collector stdout from ``portal_codemode_execute`` MCP result text."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    for prefix in ("Error:", "Blocked:", "Execution denied"):
+        if raw.startswith(prefix):
+            raise RuntimeError(raw[:800])
+    try:
+        wrapper = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+    if not isinstance(wrapper, dict):
+        return raw
+    if not ("stdout" in wrapper or "errors" in wrapper or "duration_ms" in wrapper):
+        return raw
+    errs = wrapper.get("errors") or []
+    if errs:
+        first = errs[0] if isinstance(errs, list) and errs else {}
+        msg = (first.get("message") if isinstance(first, dict) else None) or str(first)
+        raise RuntimeError(f"codemode error: {str(msg)[:500]}")
+    stdout = str(wrapper.get("stdout") or "")
+    if not stdout.strip():
+        rv = wrapper.get("return_value")
+        if rv is not None:
+            stdout = json.dumps(rv) if not isinstance(rv, str) else str(rv)
+    return stdout
+
+
+def _extract_last_json_object(text: str) -> dict[str, Any] | None:
+    """Return the last top-level ``{...}`` object in *text*, if any."""
+    last: dict[str, Any] | None = None
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        for j in range(i, n):
+            ch = text[j]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    chunk = text[i : j + 1]
+                    try:
+                        obj = json.loads(chunk)
+                        if isinstance(obj, dict):
+                            last = obj
+                    except json.JSONDecodeError:
+                        pass
+                    i = j + 1
+                    break
+        else:
+            break
+    return last
+
+
 def _parse_collector_json(text: str) -> dict[str, Any]:
     text = (text or "").strip()
     if not text:
@@ -43,7 +103,14 @@ def _parse_collector_json(text: str) -> dict[str, Any]:
                     return data
             except json.JSONDecodeError:
                 continue
-    raise ValueError("collector output is not valid JSON object")
+    found = _extract_last_json_object(text)
+    if found is not None:
+        return found
+    preview = text[:240].replace("\n", "\\n")
+    raise ValueError(f"collector output is not valid JSON object (preview: {preview!r})")
+
+
+parse_collector_json = _parse_collector_json
 
 
 @dataclass
@@ -314,28 +381,7 @@ class TrackerScheduler:
             text, is_err = await self._execute_codemode(tr.collector_ref, timeout)
             if is_err:
                 raise RuntimeError(f"codemode MCP error: {text[:500]}")
-            # portal_codemode_execute returns a JSON wrapper:
-            # {stdout, stderr, return_value, duration_ms, errors[]}.
-            # The collector's JSON sits inside ``stdout``.
-            try:
-                wrapper = json.loads(text)
-            except json.JSONDecodeError:
-                wrapper = None
-            if isinstance(wrapper, dict) and (
-                "stdout" in wrapper or "errors" in wrapper or "duration_ms" in wrapper
-            ):
-                errs = wrapper.get("errors") or []
-                if errs:
-                    first = errs[0] if isinstance(errs, list) and errs else {}
-                    msg = (first.get("message") if isinstance(first, dict) else None) or str(first)
-                    raise RuntimeError(f"codemode error: {str(msg)[:500]}")
-                stdout = wrapper.get("stdout") or ""
-                if not stdout.strip():
-                    rv = wrapper.get("return_value")
-                    if rv is not None:
-                        stdout = json.dumps(rv) if not isinstance(rv, str) else rv
-                return stdout
-            return text
+            return unwrap_codemode_portal_response(text)
 
         if kind == "bash":
             if self._execute_bash is None:

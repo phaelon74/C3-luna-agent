@@ -27,6 +27,7 @@ from mose.learning import (
     init_skill_review,
 )
 from mose.tools import (
+    execute_mcp_tool,
     init_approval,
     init_skills_dir,
     init_terminal,
@@ -35,10 +36,13 @@ from mose.tools import (
     init_workspace,
 )
 from mose.trackers import (
+    TrackerScheduler,
     default_plex_codemode_collector,
     default_plex_cpu_monitor_collector,
     default_plex_viewers_collector,
     init_tracker_alert_callback,
+    unwrap_codemode_portal_response,
+    parse_collector_json,
 )
 from mose.tracker_decision import handle_tracker_decision, init_tracker_decision_runtime
 from mose.task_decision import (
@@ -421,6 +425,83 @@ def _run_tracker_compact_cli(config, *, vacuum: bool) -> int:
         memory.close()
 
 
+async def _init_mcp_for_cli(config) -> MCPManager:
+    mcp = MCPManager()
+    mcp_config_path = config.root_dir / "mcp_servers.json"
+    await mcp.load_servers(mcp_config_path)
+    init_tool_registry(mcp, config)
+    return mcp
+
+
+async def _run_debug_tracker_collector_cli(config, slug: str) -> int:
+    """Run one collector via Code Mode and print raw portal + parsed output."""
+    memory = MemoryManager(config.memory)
+    tr = memory.get_tracker(slug)
+    if tr is None:
+        print(f"Error: unknown tracker '{slug}'", file=sys.stderr)
+        memory.close()
+        return 2
+    mcp = await _init_mcp_for_cli(config)
+    try:
+
+        async def _exec_codemode(code: str, timeout: int) -> tuple[str, bool]:
+            return await execute_mcp_tool(
+                "mcp-portal__portal_codemode_execute",
+                {"code": code, "timeout_seconds": min(120, max(5, int(timeout)))},
+            )
+
+        text, is_err = await _exec_codemode(
+            tr.collector_ref,
+            min(120, max(10, int(config.trackers.code_timeout_seconds))),
+        )
+        report: dict[str, Any] = {
+            "slug": slug,
+            "collector_kind": tr.collector_kind,
+            "mcp_is_error": is_err,
+            "raw_preview": text[:2000],
+            "raw_len": len(text or ""),
+        }
+        try:
+            stdout = unwrap_codemode_portal_response(text)
+            report["stdout_preview"] = stdout[:2000]
+            report["stdout_len"] = len(stdout or "")
+            parsed = parse_collector_json(stdout)
+            report["parsed_metrics_keys"] = sorted((parsed.get("metrics") or {}).keys())
+            report["parse_ok"] = True
+        except Exception as e:
+            report["parse_ok"] = False
+            report["error"] = str(e)
+        print(json.dumps(report, indent=2))
+        return 0 if report.get("parse_ok") else 1
+    finally:
+        await mcp.close()
+        memory.close()
+
+
+async def _run_tracker_run_now_cli(config, slug: str) -> int:
+    """Run one tracker tick with MCP (same path as the live agent scheduler)."""
+    memory = MemoryManager(config.memory)
+    mcp = await _init_mcp_for_cli(config)
+    try:
+
+        async def _exec_codemode(code: str, timeout: int) -> tuple[str, bool]:
+            return await execute_mcp_tool(
+                "mcp-portal__portal_codemode_execute",
+                {"code": code, "timeout_seconds": min(120, max(5, int(timeout)))},
+            )
+
+        sch = TrackerScheduler(memory, config.trackers, execute_codemode=_exec_codemode)
+        msg = await sch.run_once(slug)
+        print(msg)
+        tr = memory.get_tracker(slug)
+        if tr is not None:
+            print(json.dumps({"last_status": tr.last_status, "consecutive_failures": tr.consecutive_failures}, indent=2))
+        return 0 if "completed" in msg else 1
+    finally:
+        await mcp.close()
+        memory.close()
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="mose", description="Mose SRE/DevOps agent")
     parser.add_argument(
@@ -483,7 +564,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--tracker-run-now",
         metavar="SLUG",
-        help="Run one tracker tick (requires a running agent process with MCP; prefer REPL).",
+        help="Run one tracker tick via Code Mode (loads MCP; does not need the live agent).",
+    )
+    parser.add_argument(
+        "--debug-tracker-collector",
+        metavar="SLUG",
+        help="Run a tracker's collector once and print raw portal output + parse diagnostics.",
     )
     return parser.parse_args(argv)
 
@@ -661,11 +747,14 @@ async def main() -> None:
         sys.exit(_run_apply_tracker_schedule_cli(config, sec))
 
     if args.tracker_run_now:
-        print(
-            "Use tracker_run_now from a live agent session (LLM tool). "
-            "One-shot CLI tick is not wired without a long-running scheduler."
-        )
-        sys.exit(2)
+        log_event(logger, "tracker_run_now_cli", slug=args.tracker_run_now)
+        code = await _run_tracker_run_now_cli(config, args.tracker_run_now.strip())
+        sys.exit(code)
+
+    if args.debug_tracker_collector:
+        log_event(logger, "debug_tracker_collector_cli", slug=args.debug_tracker_collector)
+        code = await _run_debug_tracker_collector_cli(config, args.debug_tracker_collector.strip())
+        sys.exit(code)
 
     log_event(logger, "startup", llm_endpoint=config.llm.endpoint)
 
