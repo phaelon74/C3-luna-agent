@@ -1,4 +1,5 @@
 # Idle sidecar; mose-agent attaches via `docker exec -i mose-sonarr-diagnostics …` / radarr sibling.
+# syntax=docker/dockerfile:1
 FROM python:3.12-slim-bookworm
 
 RUN apt-get update \
@@ -8,7 +9,8 @@ RUN apt-get update \
 WORKDIR /opt/arr-diagnostics
 
 COPY docker/arr-diagnostics/requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
 COPY docker/arr-diagnostics/arr_diagnostics ./arr_diagnostics
 COPY docker/arr-diagnostics/scripts ./scripts

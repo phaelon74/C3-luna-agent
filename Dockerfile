@@ -10,6 +10,8 @@
 #
 # Without this the non-root user would need to run as root to read the socket,
 # which defeats the purpose. Use a socket proxy for stricter deployments.
+#
+# syntax=docker/dockerfile:1
 
 # Client-only docker binary for `docker exec -i` MCP stdio bridge (see INSTALL.md D).
 FROM docker:26-cli AS dockercli
@@ -27,6 +29,17 @@ RUN apt-get update \
 COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
 
 WORKDIR /app
+
+# Dependency layer: only re-run pip when package metadata or source trees change.
+COPY pyproject.toml README.md docker/check_pyproject.py ./
+COPY mose ./mose
+COPY mose_portal ./mose_portal
+
+RUN python3 docker/check_pyproject.py
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -e ".[dev]"
+
 COPY . .
 
 # If no registry was copied (minimal clone / CI), seed from the repo example — do not
@@ -34,11 +47,7 @@ COPY . .
 RUN if [ ! -f mcp_servers.json ]; then cp mcp_servers.example.json mcp_servers.json; fi \
     && if [ ! -f mcp_servers.portal.json ]; then cp mcp_servers.portal.example.json mcp_servers.portal.json; fi
 
-# Fail fast with actionable errors if pyproject.toml is a BOM/LFS pointer/UTF-16 style corrupt file.
-RUN python3 docker/check_pyproject.py
-
-RUN pip install --no-cache-dir -e ".[dev]" \
-    && groupadd -g ${APP_GID} mose \
+RUN groupadd -g ${APP_GID} mose \
     && useradd -m -u ${APP_UID} -g ${APP_GID} -s /bin/bash mose \
     && (getent group docker >/dev/null || groupadd -g ${DOCKER_GID} docker) \
     && usermod -aG docker mose \
