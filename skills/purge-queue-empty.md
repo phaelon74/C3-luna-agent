@@ -38,23 +38,35 @@ function queueRecords(q) {
 
 function msgText(msgs) {
   if (!Array.isArray(msgs)) return "";
-  return msgs.map((m) => (m && (m.title || m.messages || "")) + "").join(" ").toLowerCase();
+  return msgs.map((m) => {
+    if (m && Array.isArray(m.messages)) return m.messages.join(" ");
+    if (m && m.messages) return String(m.messages);
+    return (m && m.title) || "";
+  }).join(" ").toLowerCase();
 }
 
 function isEmptyRow(r) {
   const size = Number(r.size) || 0;
   const left = Number(r.sizeleft) || 0;
   if (size === 0 && left === 0) return true;
-  const err = String(r.errorMessage || r.message || "");
-  if (err && size === 0) return true;
+  const err = String(r.errorMessage || r.message || "").toLowerCase();
+  if (size === 0 && err) return true;
   const mt = msgText(r.statusMessages);
-  if (mt.includes("no files") || mt.includes("0 files") || mt.includes("empty")) return true;
+  if (mt.includes("no files") || mt.includes("no video") || mt.includes("0 files") || mt.includes("empty")) return true;
+  if (err.includes("no files") || err.includes("no video") || err.includes("0 files") || err.includes("empty")) return true;
   return false;
 }
 
-function needsManualImportProbe(r) {
+function isStuckImportState(r) {
   const st = String(r.status || "").toLowerCase();
-  return st === "importpending" || st === "importblocked";
+  const tds = String(r.trackedDownloadState || "").toLowerCase();
+  return (
+    st === "importpending" ||
+    st === "importblocked" ||
+    tds === "importpending" ||
+    tds === "importblocked" ||
+    tds === "waitingforimport"
+  );
 }
 
 function manualImportHasFiles(mi) {
@@ -89,7 +101,7 @@ async function probeSonarrManualImport(r) {
 
 async function isPurgeCandidate(app, r) {
   if (isEmptyRow(r)) return { purge: true, reason: "empty_queue_metadata" };
-  if (!needsManualImportProbe(r)) return { purge: false, reason: "not_manual_import_stuck" };
+  if (!isStuckImportState(r)) return { purge: false, reason: "not_manual_import_stuck" };
   const hasFiles = app === "radarr"
     ? await probeRadarrManualImport(r)
     : await probeSonarrManualImport(r);
@@ -128,7 +140,7 @@ for (const r of queueRecords(radarrQ)) {
 console.log(JSON.stringify({ dryRun: true, count: candidates.length, candidates }, null, 2));
 ```
 
-**Stage 2 (manual import probe):** For `importPending` / `importBlocked` rows with a completed download, call `radarr_get_manual_import` / `sonarr_get_manual_import` with `downloadId`. Empty result = no importable video (purge). Non-empty = real release awaiting manual import (skip). Probe errors = skip (do not purge).
+**Stage 2 (manual import probe):** For rows with `status` or `trackedDownloadState` in importPending/importBlocked, call `radarr_get_manual_import` / `sonarr_get_manual_import` with `downloadId`. Empty result = no importable video (purge). Non-empty = real release awaiting manual import (skip). Probe errors = skip (do not purge).
 
 **Do not** use filesystem checks — queue + manualimport API only.
 

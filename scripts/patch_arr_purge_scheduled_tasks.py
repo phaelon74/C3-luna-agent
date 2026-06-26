@@ -31,7 +31,37 @@ function queueRecords(q) {
 }
 function msgText(msgs) {
   if (!Array.isArray(msgs)) return "";
-  return msgs.map((m) => (m && (m.title || m.messages || "")) + "").join(" ").toLowerCase();
+  return msgs.map((m) => {
+    if (m && Array.isArray(m.messages)) return m.messages.join(" ");
+    if (m && m.messages) return String(m.messages);
+    return (m && m.title) || "";
+  }).join(" ").toLowerCase();
+}
+function isStuckImportState(r) {
+  const st = String(r.status || "").toLowerCase();
+  const tds = String(r.trackedDownloadState || "").toLowerCase();
+  return (
+    st === "importpending" ||
+    st === "importblocked" ||
+    tds === "importpending" ||
+    tds === "importblocked" ||
+    tds === "waitingforimport"
+  );
+}
+function isEmptyRow(r) {
+  const size = Number(r.size) || 0;
+  const left = Number(r.sizeleft) || 0;
+  if (size === 0 && left === 0) return true;
+  const err = String(r.errorMessage || r.message || "").toLowerCase();
+  if (size === 0 && err) return true;
+  const mt = msgText(r.statusMessages);
+  if (mt.includes("no files") || mt.includes("no video") || mt.includes("0 files") || mt.includes("empty")) {
+    return true;
+  }
+  if (err.includes("no files") || err.includes("no video") || err.includes("0 files") || err.includes("empty")) {
+    return true;
+  }
+  return false;
 }
 function isSampleRow(r) {
   const title = String(r.title || r.sourceTitle || "");
@@ -47,11 +77,42 @@ function summarize(r) {
     id: r.id,
     title: r.title,
     status: r.status,
+    trackedDownloadState: r.trackedDownloadState,
     size: r.size,
     sizeleft: r.sizeleft,
     downloadId: r.downloadId,
+    errorMessage: r.errorMessage,
     statusMessages: r.statusMessages,
   };
+}
+function manualImportHasFiles(mi) {
+  const p = parseMcp(mi);
+  if (!p) return null;
+  if (Array.isArray(p)) return p.length > 0;
+  if (p && Array.isArray(p.files)) return p.files.length > 0;
+  return false;
+}
+async function probeManualImport(app, r) {
+  const downloadId = r.downloadId;
+  if (!downloadId) return null;
+  try {
+    const mi =
+      app === "radarr"
+        ? await mcp.radarr_diagnostics.radarr_get_manual_import({ downloadId })
+        : await mcp.sonarr_diagnostics.sonarr_get_manual_import({ downloadId });
+    return manualImportHasFiles(mi);
+  } catch {
+    return null;
+  }
+}
+async function purgeReason(app, r) {
+  if (isSampleRow(r)) return "sample";
+  if (isEmptyRow(r)) return "empty_queue_metadata";
+  if (!isStuckImportState(r)) return null;
+  const hasFiles = await probeManualImport(app, r);
+  if (hasFiles === null) return null;
+  if (!hasFiles) return "no_importable_video_files";
+  return null;
 }
 """
 
@@ -61,9 +122,10 @@ _SONARR_LIST = (
 const q = await mcp.sonarr_diagnostics.sonarr_get_queue({});
 const candidates = [];
 for (const r of queueRecords(q)) {
-  if (isSampleRow(r)) candidates.push(summarize(r));
+  const reason = await purgeReason("sonarr", r);
+  if (reason) candidates.push({ ...summarize(r), purgeReason: reason });
 }
-console.log(JSON.stringify({ dryRun: true, app: "sonarr", count: candidates.length, candidates }));
+console.log(JSON.stringify({ dryRun: true, app: "sonarr", count: candidates.length, candidates }, null, 2));
 """
 )
 
@@ -74,14 +136,15 @@ const q = await mcp.sonarr_diagnostics.sonarr_get_queue({});
 const deleted = [];
 const skipped = [];
 for (const r of queueRecords(q)) {
-  if (!isSampleRow(r)) {
-    skipped.push({ id: r.id, title: r.title, reason: "not_sample" });
+  const reason = await purgeReason("sonarr", r);
+  if (!reason) {
+    skipped.push({ id: r.id, title: r.title, reason: "healthy_or_probe_skipped" });
     continue;
   }
   const del = await mcp.sonarr_diagnostics.sonarr_delete_queue_item({ id: r.id });
-  deleted.push({ id: r.id, title: r.title, result: del });
+  deleted.push({ id: r.id, title: r.title, purgeReason: reason, result: del });
 }
-console.log(JSON.stringify({ app: "sonarr", deleted_count: deleted.length, deleted, skipped_count: skipped.length }));
+console.log(JSON.stringify({ app: "sonarr", deleted_count: deleted.length, deleted, skipped_count: skipped.length, skipped }, null, 2));
 """
 )
 
@@ -91,9 +154,10 @@ _RADARR_LIST = (
 const q = await mcp.radarr_diagnostics.radarr_get_queue({});
 const candidates = [];
 for (const r of queueRecords(q)) {
-  if (isSampleRow(r)) candidates.push(summarize(r));
+  const reason = await purgeReason("radarr", r);
+  if (reason) candidates.push({ ...summarize(r), purgeReason: reason });
 }
-console.log(JSON.stringify({ dryRun: true, app: "radarr", count: candidates.length, candidates }));
+console.log(JSON.stringify({ dryRun: true, app: "radarr", count: candidates.length, candidates }, null, 2));
 """
 )
 
@@ -104,14 +168,15 @@ const q = await mcp.radarr_diagnostics.radarr_get_queue({});
 const deleted = [];
 const skipped = [];
 for (const r of queueRecords(q)) {
-  if (!isSampleRow(r)) {
-    skipped.push({ id: r.id, title: r.title, reason: "not_sample" });
+  const reason = await purgeReason("radarr", r);
+  if (!reason) {
+    skipped.push({ id: r.id, title: r.title, reason: "healthy_or_probe_skipped" });
     continue;
   }
   const del = await mcp.radarr_diagnostics.radarr_delete_queue_item({ id: r.id });
-  deleted.push({ id: r.id, title: r.title, result: del });
+  deleted.push({ id: r.id, title: r.title, purgeReason: reason, result: del });
 }
-console.log(JSON.stringify({ app: "radarr", deleted_count: deleted.length, deleted, skipped_count: skipped.length }));
+console.log(JSON.stringify({ app: "radarr", deleted_count: deleted.length, deleted, skipped_count: skipped.length, skipped }, null, 2));
 """
 )
 
@@ -123,15 +188,15 @@ _PATCHES = {
             "sonarr-diagnostics__sonarr_delete_queue_item",
         ],
         "procedure": (
-            "Sonarr queue sample purge only (not Radarr). "
-            "1) Run the list codemode script to find sample queue rows. "
-            "2) Run the purge codemode script to delete confirmed samples. "
-            "3) Re-run list to verify count is 0. "
-            "Leave healthy queued downloads alone."
+            "Sonarr queue purge only (not Radarr). "
+            "Delete: samples, zero-byte/empty rows, and import-stuck rows with no importable video "
+            "(use bundled list/purge codemode scripts — they probe sonarr_get_manual_import for importPending). "
+            "1) Run list script. 2) Run purge script. 3) Re-run list to verify. "
+            "Leave healthy queued downloads and rows with importable files alone."
         ),
         "codemode_scripts": [
-            {"purpose": "sonarr_list_samples", "code": _SONARR_LIST.strip()},
-            {"purpose": "sonarr_purge_samples", "code": _SONARR_PURGE.strip()},
+            {"purpose": "sonarr_list_purge_candidates", "code": _SONARR_LIST.strip()},
+            {"purpose": "sonarr_purge_candidates", "code": _SONARR_PURGE.strip()},
         ],
     },
     "radarr-queue-daily-purge": {
@@ -141,15 +206,15 @@ _PATCHES = {
             "radarr-diagnostics__radarr_delete_queue_item",
         ],
         "procedure": (
-            "Radarr queue sample purge only (not Sonarr). "
-            "1) Run the list codemode script to find sample queue rows. "
-            "2) Run the purge codemode script to delete confirmed samples. "
-            "3) Re-run list to verify count is 0. "
-            "Leave healthy queued downloads alone."
+            "Radarr queue purge only (not Sonarr). "
+            "Delete: samples, zero-byte/empty rows, and import-stuck rows with no importable video "
+            "(use bundled list/purge codemode scripts — they probe radarr_get_manual_import for importPending). "
+            "1) Run list script. 2) Run purge script. 3) Re-run list to verify. "
+            "Leave healthy queued downloads and rows with importable files alone."
         ),
         "codemode_scripts": [
-            {"purpose": "radarr_list_samples", "code": _RADARR_LIST.strip()},
-            {"purpose": "radarr_purge_samples", "code": _RADARR_PURGE.strip()},
+            {"purpose": "radarr_list_purge_candidates", "code": _RADARR_LIST.strip()},
+            {"purpose": "radarr_purge_candidates", "code": _RADARR_PURGE.strip()},
         ],
     },
 }
