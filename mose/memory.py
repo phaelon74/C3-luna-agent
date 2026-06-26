@@ -161,6 +161,16 @@ CREATE TABLE IF NOT EXISTS scheduled_task_runs (
 CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_tid ON scheduled_task_runs(task_id, started_at);
 """
 
+SCHEDULED_APPROVAL_SESSIONS_SQL = """
+CREATE TABLE IF NOT EXISTS scheduled_approval_sessions (
+    token TEXT PRIMARY KEY,
+    task_slug TEXT,
+    allowed_tools TEXT NOT NULL,
+    expires_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_approval_sessions_exp ON scheduled_approval_sessions(expires_at);
+"""
+
 FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content,
@@ -279,6 +289,7 @@ class MemoryManager:
         self._ensure_pending_approvals()
         self._ensure_trackers()
         self._ensure_scheduled_tasks()
+        self._ensure_scheduled_approval_sessions()
         log_event(logger, "memory_initialized", db_path=config.db_path)
 
     def _init_schema(self) -> None:
@@ -329,6 +340,72 @@ class MemoryManager:
         if not row:
             self.db.executescript(SCHEDULED_TASKS_SQL)
             self.db.commit()
+
+    def _ensure_scheduled_approval_sessions(self) -> None:
+        row = self.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_approval_sessions'"
+        ).fetchone()
+        if not row:
+            self.db.executescript(SCHEDULED_APPROVAL_SESSIONS_SQL)
+            self.db.commit()
+
+    def save_scheduled_approval_session(
+        self,
+        token: str,
+        *,
+        task_slug: str,
+        allowed_tools: list[str],
+        ttl_seconds: float = 7200,
+    ) -> None:
+        """Persist an approval token so the HTTP approval bridge can bypass across processes."""
+        now = time.time()
+        self.purge_expired_scheduled_approval_sessions(now=now)
+        self.db.execute(
+            "INSERT OR REPLACE INTO scheduled_approval_sessions "
+            "(token, task_slug, allowed_tools, expires_at) VALUES (?, ?, ?, ?)",
+            (
+                token,
+                task_slug,
+                json.dumps(allowed_tools),
+                now + max(60.0, float(ttl_seconds)),
+            ),
+        )
+        self.db.commit()
+
+    def get_scheduled_approval_tools(self, token: str, *, now: float | None = None) -> frozenset[str] | None:
+        ts = time.time() if now is None else now
+        row = self.db.execute(
+            "SELECT allowed_tools, expires_at FROM scheduled_approval_sessions WHERE token = ?",
+            (token,),
+        ).fetchone()
+        if not row:
+            return None
+        allowed_raw, expires_at = row[0], float(row[1])
+        if expires_at < ts:
+            self.db.execute("DELETE FROM scheduled_approval_sessions WHERE token = ?", (token,))
+            self.db.commit()
+            return None
+        try:
+            parsed = json.loads(allowed_raw)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(parsed, list):
+            return None
+        tools = frozenset(str(t).strip() for t in parsed if str(t).strip())
+        return tools if tools else None
+
+    def delete_scheduled_approval_session(self, token: str) -> None:
+        self.db.execute("DELETE FROM scheduled_approval_sessions WHERE token = ?", (token,))
+        self.db.commit()
+
+    def purge_expired_scheduled_approval_sessions(self, *, now: float | None = None) -> int:
+        ts = time.time() if now is None else now
+        cur = self.db.execute(
+            "DELETE FROM scheduled_approval_sessions WHERE expires_at < ?",
+            (ts,),
+        )
+        self.db.commit()
+        return int(cur.rowcount)
 
     # ---------------------------------------------------------- approvals
 

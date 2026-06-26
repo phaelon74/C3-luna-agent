@@ -199,9 +199,75 @@ def init_scheduled_task_tool_context(
     _get_task_scheduler = get_scheduler
 
 
+def _open_scheduled_task_memory() -> Any | None:
+    """Open memory DB when the global manager is unset (e.g. approval bridge process)."""
+    try:
+        from mose.config import load_config
+        from mose.memory import MemoryManager
+
+        cfg = _scheduled_task_config or load_config()
+        mem_cfg = getattr(cfg, "memory", None) or load_config().memory
+        return MemoryManager(mem_cfg)
+    except Exception:
+        return None
+
+
+def _with_scheduled_task_memory(fn: Callable[[Any], None]) -> None:
+    mem = _scheduled_task_memory
+    owned = False
+    if mem is None:
+        mem = _open_scheduled_task_memory()
+        owned = mem is not None
+    if mem is None:
+        return
+    try:
+        fn(mem)
+    finally:
+        if owned:
+            mem.close()
+
+
+def _persist_scheduled_approval_session(
+    token: str, slug: str, allowed_tools: frozenset[str]
+) -> None:
+    _scheduled_approval_sessions[token] = allowed_tools
+
+    def _save(mem: Any) -> None:
+        mem.save_scheduled_approval_session(
+            token,
+            task_slug=slug,
+            allowed_tools=sorted(allowed_tools),
+        )
+
+    _with_scheduled_task_memory(_save)
+
+
+def _clear_scheduled_approval_session(token: str) -> None:
+    _scheduled_approval_sessions.pop(token, None)
+
+    def _delete(mem: Any) -> None:
+        mem.delete_scheduled_approval_session(token)
+
+    _with_scheduled_task_memory(_delete)
+
+
+def _lookup_scheduled_approval_tools(token: str) -> frozenset[str] | None:
+    if token in _scheduled_approval_sessions:
+        return _scheduled_approval_sessions[token]
+
+    found: frozenset[str] | None = None
+
+    def _lookup(mem: Any) -> None:
+        nonlocal found
+        found = mem.get_scheduled_approval_tools(token)
+
+    _with_scheduled_task_memory(_lookup)
+    return found
+
+
 def enter_scheduled_execution(slug: str, allowed_tools: frozenset[str]) -> Token:
     approval_token = secrets.token_urlsafe(16)
-    _scheduled_approval_sessions[approval_token] = allowed_tools
+    _persist_scheduled_approval_session(approval_token, slug, allowed_tools)
     return _scheduled_exec_ctx.set(
         {"slug": slug, "allowed_tools": allowed_tools, "approval_token": approval_token}
     )
@@ -212,7 +278,7 @@ def exit_scheduled_execution(token: Token) -> None:
     if ctx:
         at = str(ctx.get("approval_token") or "").strip()
         if at:
-            _scheduled_approval_sessions.pop(at, None)
+            _clear_scheduled_approval_session(at)
     _scheduled_exec_ctx.reset(token)
 
 
@@ -261,7 +327,7 @@ def scheduled_approval_bypasses(tool_name: str, approval_token: str | None) -> b
     """True when a mutating tool is pre-approved for an active scheduled task run."""
     token = (approval_token or "").strip()
     if token:
-        allowed = _scheduled_approval_sessions.get(token)
+        allowed = _lookup_scheduled_approval_tools(token)
         if allowed and tool_name in allowed:
             return True
     return scheduled_execution_bypasses_approval(tool_name)
