@@ -502,6 +502,42 @@ async def _run_tracker_run_now_cli(config, slug: str) -> int:
         memory.close()
 
 
+async def _run_scheduled_task_run_now_cli(config, slug: str) -> int:
+    """Run one scheduled task via the full agent loop (MCP + LLM + tool allowlist)."""
+    from mose.agent import Agent
+
+    init_workspace(config.agent.workspace, config.agent.allow_read_outside)
+    init_skills_dir(config.agent.skills_path)
+    memory = MemoryManager(config.memory)
+    task = memory.get_scheduled_task(slug)
+    if task is None:
+        print(f"Error: unknown scheduled task '{slug}'", file=sys.stderr)
+        memory.close()
+        return 2
+    mcp = await _init_mcp_for_cli(config)
+    llm = create_llm_client(config.llm)
+    agent = Agent(config, llm, memory, mcp)
+    try:
+        result = await agent.run_scheduled_task(task)
+        print(json.dumps(result, indent=2))
+        task2 = memory.get_scheduled_task(slug)
+        if task2 is not None:
+            print(
+                json.dumps(
+                    {
+                        "slug": slug,
+                        "last_status": task2.last_status,
+                        "consecutive_failures": task2.consecutive_failures,
+                    },
+                    indent=2,
+                )
+            )
+        return 0 if result.get("status") == "ok" else 1
+    finally:
+        await mcp.close()
+        memory.close()
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="mose", description="Mose SRE/DevOps agent")
     parser.add_argument(
@@ -570,6 +606,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--debug-tracker-collector",
         metavar="SLUG",
         help="Run a tracker's collector once and print raw portal output + parse diagnostics.",
+    )
+    parser.add_argument(
+        "--scheduled-task-run-now",
+        metavar="SLUG",
+        help="Run one scheduled task immediately (full agent loop; does not need live Signal bot).",
     )
     return parser.parse_args(argv)
 
@@ -754,6 +795,11 @@ async def main() -> None:
     if args.debug_tracker_collector:
         log_event(logger, "debug_tracker_collector_cli", slug=args.debug_tracker_collector)
         code = await _run_debug_tracker_collector_cli(config, args.debug_tracker_collector.strip())
+        sys.exit(code)
+
+    if args.scheduled_task_run_now:
+        log_event(logger, "scheduled_task_run_now_cli", slug=args.scheduled_task_run_now)
+        code = await _run_scheduled_task_run_now_cli(config, args.scheduled_task_run_now.strip())
         sys.exit(code)
 
     log_event(logger, "startup", llm_endpoint=config.llm.endpoint)
