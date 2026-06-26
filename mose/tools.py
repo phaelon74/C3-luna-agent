@@ -1392,7 +1392,7 @@ async def execute_mcp_tool(full_name: str, arguments: dict[str, Any]) -> tuple[s
         ctx = _scheduled_exec_ctx.get()
         at = str((ctx or {}).get("approval_token") or "").strip()
         if at:
-            arguments = {**arguments, "_scheduled_approval_token": at}
+            arguments = {**arguments, "scheduled_approval_token": at}
 
     policy = classify_mcp_tool(server, bare_tool)
     if policy != "read":

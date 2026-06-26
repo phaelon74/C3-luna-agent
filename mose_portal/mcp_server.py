@@ -270,19 +270,20 @@ def build_app() -> FastMCP:
         ctx: Context,
         code: str,
         timeout_seconds: int = 30,
-        _scheduled_approval_token: str | None = None,
+        scheduled_approval_token: str | None = None,
     ) -> str:
         """Run TypeScript in the Code Mode sandbox.
 
         Returns structured ``{stdout, stderr, return_value, duration_ms, errors[]}``.
         Mutating MCP tools require the agent HTTP approval bridge (``MCP_PORTAL_AGENT_APPROVAL_URL``).
+        ``scheduled_approval_token`` is injected by the agent for approved scheduled tasks only — do not set manually.
         """
         state: PortalLifespanState = ctx.request_context.lifespan_context
         return await execute_impl(
             state,
             code,
             timeout_seconds,
-            scheduled_approval_token=_scheduled_approval_token,
+            scheduled_approval_token=scheduled_approval_token,
         )
 
     return mcp
