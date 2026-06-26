@@ -31,7 +31,8 @@ COPY --from=dockercli /usr/local/bin/docker /usr/local/bin/docker
 WORKDIR /app
 
 # Dependency layer: only re-run pip when package metadata or source trees change.
-COPY pyproject.toml README.md docker/check_pyproject.py ./
+COPY pyproject.toml README.md ./
+COPY docker/check_pyproject.py docker/check_pyproject.py
 COPY mose ./mose
 COPY mose_portal ./mose_portal
 
