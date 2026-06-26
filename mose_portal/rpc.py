@@ -39,6 +39,7 @@ async def _request_mutating_tool_approval(
     server: str,
     tool: str,
     arguments: dict[str, Any],
+    scheduled_approval_token: str | None = None,
 ) -> bool:
     summary = json.dumps(arguments, default=str, sort_keys=True)
     if len(summary) > 500:
@@ -49,6 +50,8 @@ async def _request_mutating_tool_approval(
         "arguments_summary": summary,
         "reason": "Code Mode: mutating MCP tool (approval required)",
     }
+    if scheduled_approval_token:
+        payload["scheduled_approval_token"] = scheduled_approval_token
     timeout = aiohttp.ClientTimeout(total=_APPROVAL_HTTP_TIMEOUT)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -70,6 +73,7 @@ class _PendingSession:
     future: asyncio.Future[dict[str, Any]]
     created_at: float
     websocket: Any | None = None
+    scheduled_approval_token: str | None = None
 
 
 def _truncate(s: str, limit: int) -> str:
@@ -109,10 +113,16 @@ class CodeModeRPC:
                 return int(socks[0].getsockname()[1])
         return self._bound_port
 
-    def register_session(self) -> tuple[str, asyncio.Future[dict[str, Any]]]:
+    def register_session(
+        self, *, scheduled_approval_token: str | None = None
+    ) -> tuple[str, asyncio.Future[dict[str, Any]]]:
         token = secrets.token_urlsafe(24)
         fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-        self._sessions[token] = _PendingSession(future=fut, created_at=time.monotonic())
+        self._sessions[token] = _PendingSession(
+            future=fut,
+            created_at=time.monotonic(),
+            scheduled_approval_token=(scheduled_approval_token or "").strip() or None,
+        )
         log.debug("codemode_session_registered token=%s", token[:8])
         return token, fut
 
@@ -353,11 +363,16 @@ class CodeModeRPC:
                     )
                 )
                 return
+            sess = self._sessions.get(session_token)
+            scheduled_approval_token = (
+                sess.scheduled_approval_token if sess is not None else None
+            )
             approved = await _request_mutating_tool_approval(
                 url=bridge,
                 server=real_server,
                 tool=tool,
                 arguments=args,
+                scheduled_approval_token=scheduled_approval_token,
             )
             if not approved:
                 await websocket.send(

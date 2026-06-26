@@ -82,9 +82,9 @@ console.log(JSON.stringify({ dryRun: true, count: candidates.length, candidates 
 
 **Do not** verify files on disk (`/media/dload`, TrueNAS, etc.) — the sandbox cannot see them; queue JSON is the source of truth.
 
-## Delete (admin approval required)
+## Delete (interactive runs: admin approval; scheduled tasks: pre-approved allowlist)
 
-After the operator approves specific `id` values:
+After the operator approves specific `id` values (interactive), or when running under an approved scheduled task that lists the delete tools in `allowed_tools`:
 
 ```ts
 // Sonarr — one id per approval batch if policy requires it
@@ -106,4 +106,4 @@ Re-run the list script; `count` should be 0 for removed ids. Report Sonarr and R
 
 - **Import blocked with a full download** is not a sample — use manual import (`sonarr_post_queue_import` / `radarr_post_queue_import`), not delete.
 - Deleting an active full download loses progress — confirm `isSampleRow` heuristics on the candidate table first.
-- Mutations require portal admin approval (Signal/Discord).
+- Mutations require portal admin approval on **interactive** runs (Signal/Discord). **Scheduled tasks** skip per-run approval when the delete tools are listed in the task's `execution_plan.allowed_tools`.

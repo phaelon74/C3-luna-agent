@@ -118,6 +118,7 @@ async def execute_impl(
     state: PortalLifespanState,
     code: str,
     timeout_seconds: int = 30,
+    scheduled_approval_token: str | None = None,
 ) -> str:
     """Run TypeScript in the Deno sandbox (``docker exec``) with RPC to this portal."""
     t0 = time.monotonic()
@@ -139,7 +140,9 @@ async def execute_impl(
         )
 
     rpc = state.rpc
-    token, fut = rpc.register_session()
+    token, fut = rpc.register_session(
+        scheduled_approval_token=scheduled_approval_token,
+    )
     # Use the actual listening port so concurrent portal processes (each on
     # their own ephemeral port) route the sandbox to the right RPC server.
     actual_rpc_port = rpc.listen_port or resolve_rpc_port()
@@ -263,13 +266,23 @@ def build_app() -> FastMCP:
         return await search_impl(state, query=query, top_k=top_k)
 
     @mcp.tool()
-    async def portal_codemode_execute(ctx: Context, code: str, timeout_seconds: int = 30) -> str:
+    async def portal_codemode_execute(
+        ctx: Context,
+        code: str,
+        timeout_seconds: int = 30,
+        _scheduled_approval_token: str | None = None,
+    ) -> str:
         """Run TypeScript in the Code Mode sandbox.
 
         Returns structured ``{stdout, stderr, return_value, duration_ms, errors[]}``.
         Mutating MCP tools require the agent HTTP approval bridge (``MCP_PORTAL_AGENT_APPROVAL_URL``).
         """
         state: PortalLifespanState = ctx.request_context.lifespan_context
-        return await execute_impl(state, code, timeout_seconds)
+        return await execute_impl(
+            state,
+            code,
+            timeout_seconds,
+            scheduled_approval_token=_scheduled_approval_token,
+        )
 
     return mcp

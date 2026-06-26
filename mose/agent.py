@@ -167,6 +167,7 @@ Prefer this over delegate for coding work.
 - When the user asks to run something daily/weekly/monthly/yearly at a set wall-clock time, use ``scheduled_task_propose``.
 - When changing an existing task's logic, schedule, or prompts, use ``scheduled_task_update_propose`` (admin approval) instead of delete-and-recreate.
 - You **MUST** fill ``execution_plan`` with ``procedure``, non-empty ``allowed_tools`` (every tool name the task will use), and ``codemode_scripts`` when using Code Mode.
+- For Code Mode tasks, list **mutating** MCP tools in ``allowed_tools`` too (e.g. ``sonarr-diagnostics__sonarr_delete_queue_item``), not only ``mcp-portal__portal_codemode_execute``. Once the task is approved, scheduled runs bypass per-run admin approval for those tools.
 - Schedule times use the **scheduler timezone** shown below (not UTC unless that is the configured zone).
 - Trackers (above) are metric collectors; scheduled tasks are full agent runs with an approved tool allowlist.
 

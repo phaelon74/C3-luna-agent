@@ -38,6 +38,7 @@ async def _handle_approve(request: web.Request) -> web.Response:
     tool = str(data.get("tool", "")).strip()
     arguments_summary = str(data.get("arguments_summary", ""))
     reason = str(data.get("reason") or "Code Mode mutating MCP call")
+    scheduled_approval_token = str(data.get("scheduled_approval_token") or "").strip() or None
 
     if not server or not tool:
         return web.json_response({"approved": False, "error": "missing server or tool"}, status=400)
@@ -46,7 +47,18 @@ async def _handle_approve(request: web.Request) -> web.Response:
     command = f"{full_name}({arguments_summary})"
     target_system = f"mcp:{server}"
 
-    from mose.tools import invoke_approval_callback
+    from mose.tools import invoke_approval_callback, scheduled_approval_bypasses
+
+    if scheduled_approval_bypasses(full_name, scheduled_approval_token):
+        log_event(
+            log,
+            "portal_approval_bridge",
+            approved=True,
+            server=server,
+            tool=tool,
+            scheduled_bypass=True,
+        )
+        return web.json_response({"approved": True})
 
     ok = await invoke_approval_callback(command, reason, target_system)
     log_event(

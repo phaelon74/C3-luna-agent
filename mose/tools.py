@@ -6,6 +6,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import time
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -120,6 +121,9 @@ _get_task_scheduler: Callable[[], Any | None] | None = None
 _scheduled_exec_ctx: ContextVar[dict[str, Any] | None] = ContextVar(
     "scheduled_exec_ctx", default=None
 )
+# Code Mode mutating calls hit the HTTP approval bridge in a different asyncio task,
+# so ContextVar alone is not enough — map agent-injected tokens to allowlists.
+_scheduled_approval_sessions: dict[str, frozenset[str]] = {}
 
 
 def init_tool_registry(mcp: "MCPManager", config: Any | None = None) -> None:
@@ -196,10 +200,19 @@ def init_scheduled_task_tool_context(
 
 
 def enter_scheduled_execution(slug: str, allowed_tools: frozenset[str]) -> Token:
-    return _scheduled_exec_ctx.set({"slug": slug, "allowed_tools": allowed_tools})
+    approval_token = secrets.token_urlsafe(16)
+    _scheduled_approval_sessions[approval_token] = allowed_tools
+    return _scheduled_exec_ctx.set(
+        {"slug": slug, "allowed_tools": allowed_tools, "approval_token": approval_token}
+    )
 
 
 def exit_scheduled_execution(token: Token) -> None:
+    ctx = _scheduled_exec_ctx.get()
+    if ctx:
+        at = str(ctx.get("approval_token") or "").strip()
+        if at:
+            _scheduled_approval_sessions.pop(at, None)
     _scheduled_exec_ctx.reset(token)
 
 
@@ -208,6 +221,14 @@ def get_scheduled_execution_slug() -> str | None:
     if not ctx:
         return None
     return str(ctx.get("slug") or "") or None
+
+
+def get_scheduled_approval_token() -> str | None:
+    ctx = _scheduled_exec_ctx.get()
+    if not ctx:
+        return None
+    token = str(ctx.get("approval_token") or "").strip()
+    return token or None
 
 
 def _scheduled_tool_block_reason(tool_name: str) -> str | None:
@@ -234,6 +255,16 @@ def scheduled_execution_bypasses_approval(tool_name: str) -> bool:
         return False
     allowed = ctx.get("allowed_tools") or frozenset()
     return tool_name in allowed
+
+
+def scheduled_approval_bypasses(tool_name: str, approval_token: str | None) -> bool:
+    """True when a mutating tool is pre-approved for an active scheduled task run."""
+    token = (approval_token or "").strip()
+    if token:
+        allowed = _scheduled_approval_sessions.get(token)
+        if allowed and tool_name in allowed:
+            return True
+    return scheduled_execution_bypasses_approval(tool_name)
 
 
 def init_terminal(cfg: "TerminalConfig", workspace: str) -> None:
@@ -1356,6 +1387,12 @@ async def execute_mcp_tool(full_name: str, arguments: dict[str, Any]) -> tuple[s
     block = _scheduled_tool_block_reason(full_name)
     if block:
         return block, False
+
+    if full_name == "mcp-portal__portal_codemode_execute":
+        ctx = _scheduled_exec_ctx.get()
+        at = str((ctx or {}).get("approval_token") or "").strip()
+        if at:
+            arguments = {**arguments, "_scheduled_approval_token": at}
 
     policy = classify_mcp_tool(server, bare_tool)
     if policy != "read":

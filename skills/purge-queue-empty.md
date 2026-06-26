@@ -132,7 +132,7 @@ console.log(JSON.stringify({ dryRun: true, count: candidates.length, candidates 
 
 **Do not** use filesystem checks — queue + manualimport API only.
 
-## Delete (admin approval required)
+## Delete (interactive runs: admin approval; scheduled tasks: pre-approved allowlist)
 
 ```ts
 const del = await mcp.sonarr_diagnostics.sonarr_delete_queue_item({ id: QUEUE_ID });
@@ -153,4 +153,4 @@ Re-run the list script; removed ids should no longer appear in `candidates`.
 - Stage 1 catches zero-byte / error rows; stage 2 catches completed downloads with no importable video.
 - Rows with importable files in manualimport still need manual import or `*_post_queue_import` — do not delete.
 - Deleting is irreversible for that queue row; operator must re-grab if it was a mistake.
-- Mutations require portal admin approval (Signal/Discord).
+- Mutations require portal admin approval on **interactive** runs. **Scheduled tasks** skip per-run approval when delete tools are in `execution_plan.allowed_tools`.

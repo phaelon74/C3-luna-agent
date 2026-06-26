@@ -9,7 +9,11 @@ import pytest
 
 from mose.approval_bridge import start_approval_bridge, stop_approval_bridge
 from mose.config import PortalConfig
-from mose.tools import init_approval
+from mose.tools import (
+    enter_scheduled_execution,
+    exit_scheduled_execution,
+    init_approval,
+)
 
 
 def _free_port() -> int:
@@ -59,5 +63,53 @@ async def test_approve_post_400_when_missing_tool() -> None:
             ) as resp:
                 assert resp.status == 400
     finally:
+        await stop_approval_bridge(handle)
+        init_approval(None)
+
+
+@pytest.mark.asyncio
+async def test_approve_post_scheduled_bypass_without_callback() -> None:
+    """Pre-approved scheduled-task mutations skip the Signal approval callback."""
+    init_approval(lambda _c, _r, _t: False)
+    port = _free_port()
+    cfg = PortalConfig(enabled=True, approval_bridge_host="127.0.0.1", approval_bridge_port=port)
+    handle = await start_approval_bridge(cfg)
+    from mose.tools import get_scheduled_approval_token
+
+    token = enter_scheduled_execution(
+        "sonarr-queue-daily-purge",
+        frozenset(["sonarr-diagnostics__sonarr_delete_queue_item"]),
+    )
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"http://127.0.0.1:{port}/approve",
+                json={
+                    "server": "sonarr-diagnostics",
+                    "tool": "sonarr_delete_queue_item",
+                    "arguments_summary": '{"id": 1}',
+                    "scheduled_approval_token": "bogus-token",
+                },
+            ) as resp:
+                assert resp.status == 200
+                body = await resp.json()
+                assert body.get("approved") is False
+
+            approval_token = get_scheduled_approval_token()
+            assert approval_token
+            async with session.post(
+                f"http://127.0.0.1:{port}/approve",
+                json={
+                    "server": "sonarr-diagnostics",
+                    "tool": "sonarr_delete_queue_item",
+                    "arguments_summary": '{"id": 1}',
+                    "scheduled_approval_token": approval_token,
+                },
+            ) as resp:
+                assert resp.status == 200
+                body = await resp.json()
+                assert body.get("approved") is True
+    finally:
+        exit_scheduled_execution(token)
         await stop_approval_bridge(handle)
         init_approval(None)
